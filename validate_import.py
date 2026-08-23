@@ -1,0 +1,382 @@
+#!/usr/bin/env python3
+"""
+validate_import.py — Validate an NX-ActivityLog import.json file for structural and data integrity.
+
+Checks:
+  - Metadata structure (exportString, exportTimestamp, exportVersion, users)
+  - User structure (id: 32-char hex, name: string, titles: array)
+  - Title structure (id: 16-char hex, name: string, summary: object, events: array)
+  - Event structure (clockTimestamp: int, steadyTimestamp: int, type: valid string)
+  - No duplicate user IDs across users
+  - No duplicate title IDs within a user
+  - All event type strings are valid
+  - Timestamps are reasonable Unix values (2017-2030)
+  - firstPlayed <= lastPlayed for each title
+  - firstPlayed == earliest event clockTimestamp
+  - lastPlayed == latest event clockTimestamp
+  - Events sorted by clockTimestamp (non-decreasing)
+  - launches == count of "Launched" events
+  - playtime consistent with focus event pairs (warn if >5% off)
+  - Logical event sequences (Launched before Closed, etc.)
+
+Usage:
+    python3 validate_import.py <import.json>
+
+Exit code: 0 if all checks pass (warnings OK), 1 if any error is found.
+"""
+
+import sys
+import time
+
+from nxal_common import (
+    EVENT_TYPE_MAP,
+    VALID_EVENT_TYPES,
+    VerificationResult,
+    is_valid_hex,
+    load_json,
+    USER_ID_HEX_LENGTH,
+    GAME_ID_HEX_LENGTH,
+)
+
+REASONABLE_TS_MIN = 1483228800  # 2017-01-01 (Switch launch year)
+REASONABLE_TS_MAX = 1893456000  # 2030-01-01
+
+
+def validate_metadata(data, result):
+    print("== Metadata ==")
+
+    required = ["exportString", "exportTimestamp", "exportVersion", "users"]
+    for field in required:
+        if field in data:
+            result.ok(f"'{field}' present")
+        else:
+            result.error(f"'{field}' missing from top level")
+
+    if "exportString" in data:
+        val = data["exportString"]
+        if isinstance(val, str) and len(val) > 0:
+            result.ok(f"exportString is non-empty: \"{val}\"")
+        else:
+            result.error(f"exportString is empty or not a string")
+
+    if "exportTimestamp" in data:
+        val = data["exportTimestamp"]
+        if isinstance(val, int) and REASONABLE_TS_MIN <= val <= REASONABLE_TS_MAX:
+            result.ok(f"exportTimestamp is reasonable: {val}")
+        elif isinstance(val, int):
+            result.warn(f"exportTimestamp is outside expected range: {val}")
+        else:
+            result.error(f"exportTimestamp is not an integer: {type(val).__name__}")
+
+    if "exportVersion" in data:
+        val = data["exportVersion"]
+        if isinstance(val, str) and len(val) > 0:
+            result.ok(f"exportVersion: {val}")
+        else:
+            result.error(f"exportVersion is empty or not a string")
+
+    extra = set(data.keys()) - {"exportString", "exportTimestamp", "exportVersion", "users"}
+    for field in sorted(extra):
+        result.warn(f"Unexpected top-level field: '{field}'")
+
+
+def validate_users(data, result):
+    print("\n== Users ==")
+
+    users = data.get("users")
+    if not isinstance(users, list):
+        result.error(f"'users' is not an array: {type(users).__name__}")
+        return
+
+    if len(users) == 0:
+        result.warn("'users' array is empty")
+        return
+
+    result.ok(f"users array has {len(users)} entries")
+
+    seen_ids = {}
+    for i, user in enumerate(users):
+        name = user.get("name", f"User#{i}")
+        prefix = f"User '{name}'"
+
+        # Required fields
+        for field in ["id", "name", "titles"]:
+            if field not in user:
+                result.error(f"{prefix}: missing field '{field}'")
+
+        # ID format
+        uid = user.get("id", "")
+        if is_valid_hex(uid, USER_ID_HEX_LENGTH):
+            result.ok(f"{prefix}: id is valid 32-char hex")
+        else:
+            result.error(f"{prefix}: id is not a valid 32-char hex string: '{uid}'")
+
+        # Duplicate ID check
+        if uid in seen_ids:
+            result.error(f"{prefix}: duplicate user id (also in {seen_ids[uid]})")
+        else:
+            seen_ids[uid] = name
+
+        # Name
+        name_val = user.get("name")
+        if isinstance(name_val, str) and len(name_val) > 0:
+            result.ok(f"{prefix}: name is non-empty")
+        else:
+            result.error(f"{prefix}: name is empty or not a string")
+
+        # Titles
+        titles = user.get("titles")
+        if isinstance(titles, list):
+            result.ok(f"{prefix}: has {len(titles)} titles")
+            validate_titles(name, titles, result)
+        else:
+            result.error(f"{prefix}: 'titles' is not an array")
+
+
+def validate_titles(user_name, titles, result):
+    seen_ids = {}
+    for i, title in enumerate(titles):
+        title_name = title.get("name", f"Title#{i}")
+        prefix = f"User '{user_name}' / '{title_name}'"
+
+        # Required fields
+        for field in ["id", "name", "summary", "events"]:
+            if field not in title:
+                result.error(f"{prefix}: missing field '{field}'")
+
+        # ID format
+        tid = title.get("id", "")
+        if is_valid_hex(tid, GAME_ID_HEX_LENGTH):
+            pass  # ok
+        else:
+            result.error(f"{prefix}: id is not a valid 16-char hex string: '{tid}'")
+
+        # Duplicate ID check
+        if tid in seen_ids:
+            result.error(f"{prefix}: duplicate title id (also in {seen_ids[tid]})")
+        else:
+            seen_ids[tid] = title_name
+
+        # Name
+        name_val = title.get("name")
+        if isinstance(name_val, str) and len(name_val) > 0:
+            pass  # ok
+        else:
+            result.error(f"{prefix}: name is empty or not a string")
+
+        # Summary
+        summary = title.get("summary")
+        if isinstance(summary, dict):
+            validate_summary(prefix, summary, result)
+        else:
+            result.error(f"{prefix}: 'summary' is not an object")
+
+        # Events
+        events = title.get("events")
+        if isinstance(events, list):
+            validate_events(prefix, events, summary, result)
+        else:
+            result.error(f"{prefix}: 'events' is not an array")
+
+
+def validate_summary(prefix, summary, result):
+    required = ["firstPlayed", "lastPlayed", "launches", "playtime"]
+    for field in required:
+        if field not in summary:
+            result.error(f"{prefix}: summary missing field '{field}'")
+
+    fp = summary.get("firstPlayed")
+    lp = summary.get("lastPlayed")
+    if isinstance(fp, int) and isinstance(lp, int):
+        if fp <= lp:
+            result.ok(f"{prefix}: summary.firstPlayed <= lastPlayed ({fp} <= {lp})")
+        else:
+            result.error(f"{prefix}: summary.firstPlayed > lastPlayed ({fp} > {lp})")
+
+    launches = summary.get("launches")
+    if isinstance(launches, int) and launches >= 0:
+        result.ok(f"{prefix}: summary.launches = {launches}")
+    elif launches is not None:
+        result.error(f"{prefix}: summary.launches is not a non-negative integer: {launches}")
+
+    playtime = summary.get("playtime")
+    if isinstance(playtime, int) and playtime >= 0:
+        result.ok(f"{prefix}: summary.playtime = {playtime}")
+    elif playtime is not None:
+        result.error(f"{prefix}: summary.playtime is not a non-negative integer: {playtime}")
+
+
+def validate_events(prefix, events, summary, result):
+    if len(events) == 0:
+        result.warn(f"{prefix}: has 0 events")
+        return
+
+    # Check each event structure
+    valid_types = True
+    for i, ev in enumerate(events):
+        ep = f"{prefix} / Event#{i}"
+
+        ct = ev.get("clockTimestamp")
+        st = ev.get("steadyTimestamp")
+        et = ev.get("type")
+
+        if not isinstance(ct, int):
+            result.error(f"{ep}: clockTimestamp is not an integer")
+            valid_types = False
+        elif not (REASONABLE_TS_MIN <= ct <= REASONABLE_TS_MAX):
+            result.warn(f"{ep}: clockTimestamp outside expected range: {ct}")
+
+        if not isinstance(st, int):
+            result.error(f"{ep}: steadyTimestamp is not an integer")
+            valid_types = False
+
+        if et not in VALID_EVENT_TYPES:
+            result.error(f"{ep}: unknown event type: '{et}'")
+            valid_types = False
+
+    if not valid_types:
+        return
+
+    # Events sorted by clockTimestamp
+    timestamps = [ev["clockTimestamp"] for ev in events]
+    if timestamps == sorted(timestamps):
+        result.ok(f"{prefix}: events sorted by clockTimestamp")
+    else:
+        result.warn(f"{prefix}: events NOT sorted by clockTimestamp")
+
+    # firstPlayed matches earliest event
+    fp = summary.get("firstPlayed") if summary else None
+    if fp is not None:
+        earliest = timestamps[0]
+        if fp == earliest:
+            result.ok(f"{prefix}: summary.firstPlayed == earliest event ({fp})")
+        else:
+            result.warn(
+                f"{prefix}: summary.firstPlayed ({fp}) != earliest event ({earliest})"
+            )
+
+    # lastPlayed matches latest event
+    lp = summary.get("lastPlayed") if summary else None
+    if lp is not None:
+        latest = timestamps[-1]
+        if lp == latest:
+            result.ok(f"{prefix}: summary.lastPlayed == latest event ({lp})")
+        else:
+            result.warn(
+                f"{prefix}: summary.lastPlayed ({lp}) != latest event ({latest})"
+            )
+
+    # launches == count of "Launched" events
+    launch_count = sum(1 for ev in events if ev["type"] == "Launched")
+    declared_launches = summary.get("launches") if summary else None
+    if declared_launches is not None:
+        if launch_count == declared_launches:
+            result.ok(f"{prefix}: launches count matches ({launch_count})")
+        else:
+            result.error(
+                f"{prefix}: launches mismatch: declared={declared_launches} "
+                f"actual={launch_count}"
+            )
+
+    # playtime check: calculate from focus pairs
+    declared_playtime = summary.get("playtime") if summary else None
+    if declared_playtime is not None:
+        calc_playtime = calculate_playtime(events)
+        if calc_playtime > 0:
+            diff_pct = abs(declared_playtime - calc_playtime) / calc_playtime * 100
+            if diff_pct <= 5:
+                result.ok(
+                    f"{prefix}: playtime consistent (declared={declared_playtime}, "
+                    f"calculated={calc_playtime}, diff={diff_pct:.1f}%)"
+                )
+            else:
+                result.warn(
+                    f"{prefix}: playtime differs by {diff_pct:.1f}% "
+                    f"(declared={declared_playtime}, calculated={calc_playtime})"
+                )
+        elif declared_playtime == 0:
+            result.ok(f"{prefix}: playtime = 0 (no focus time)")
+        else:
+            result.warn(
+                f"{prefix}: playtime={declared_playtime} but no focus events to validate"
+            )
+
+    # Logical event sequences
+    validate_event_sequences(prefix, events, result)
+
+
+def calculate_playtime(events):
+    playtime = 0
+    last_focus_start = None
+    for ev in events:
+        if ev["type"] == "Gained Focus":
+            last_focus_start = ev["clockTimestamp"]
+        elif ev["type"] == "Lost Focus" and last_focus_start is not None:
+            playtime += ev["clockTimestamp"] - last_focus_start
+            last_focus_start = None
+    if last_focus_start is not None:
+        playtime += int(time.time()) - last_focus_start
+    return playtime
+
+
+def validate_event_sequences(prefix, events, result):
+    launched_count = 0
+    closed_count = 0
+    focus_depth = 0
+
+    for i, ev in enumerate(events):
+        et = ev["type"]
+
+        if et == "Launched":
+            launched_count += 1
+        elif et == "Closed":
+            closed_count += 1
+            if closed_count > launched_count:
+                result.error(
+                    f"{prefix}: 'Closed' at event#{i} without preceding 'Launched'"
+                )
+                return
+        elif et == "Gained Focus":
+            focus_depth += 1
+        elif et == "Lost Focus":
+            focus_depth -= 1
+            if focus_depth < 0:
+                result.error(
+                    f"{prefix}: 'Lost Focus' at event#{i} without preceding 'Gained Focus'"
+                )
+                return
+
+    if launched_count > 0:
+        result.ok(
+            f"{prefix}: {launched_count} launch(es), {closed_count} close(es), "
+            f"focus balance OK"
+        )
+
+
+def main():
+    if len(sys.argv) != 2:
+        print(f"Usage: {sys.argv[0]} <import.json>")
+        sys.exit(2)
+
+    import_path = sys.argv[1]
+
+    try:
+        data = load_json(import_path)
+    except Exception as e:
+        print(f"Error loading {import_path}: {e}")
+        sys.exit(2)
+
+    print(f"Validating: {import_path}\n")
+
+    result = VerificationResult()
+
+    validate_metadata(data, result)
+    validate_users(data, result)
+
+    print("\n" + "=" * 60)
+    result.summary()
+    sys.exit(0 if result.passed else 1)
+
+
+if __name__ == "__main__":
+    main()
