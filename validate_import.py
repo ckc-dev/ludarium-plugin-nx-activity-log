@@ -27,6 +27,7 @@ Exit code: 0 if all checks pass (warnings OK), 1 if any error is found.
 
 import sys
 import time
+from datetime import datetime
 
 from nxal_common import (
     EVENT_TYPE_MAP,
@@ -129,6 +130,7 @@ def validate_users(data, result):
         if isinstance(titles, list):
             result.ok(f"{prefix}: has {len(titles)} titles")
             validate_titles(name, titles, result)
+            print_user_sessions(user)
         else:
             result.error(f"{prefix}: 'titles' is not an array")
 
@@ -335,6 +337,43 @@ def calculate_playtime(events):
     if last_focus_start is not None:
         playtime += int(time.time()) - last_focus_start
     return playtime
+
+
+def format_timestamp(ts):
+    """Format Unix timestamp to human-readable datetime."""
+    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def print_user_sessions(user):
+    """Print the first and last sessions for a user."""
+    name = user.get("name", "Unknown")
+    titles = user.get("titles", [])
+
+    if not titles:
+        return
+
+    first_session = None
+    last_session = None
+
+    for title in titles:
+        events = title.get("events", [])
+        title_name = title.get("name", "Unknown")
+
+        for ev in events:
+            if ev["type"] == "Launched":
+                ts = ev["clockTimestamp"]
+                session_info = {"game": title_name, "timestamp": ts}
+
+                if first_session is None or ts < first_session["timestamp"]:
+                    first_session = session_info
+
+                if last_session is None or ts > last_session["timestamp"]:
+                    last_session = session_info
+
+    if first_session:
+        print(f"  First session: {format_timestamp(first_session['timestamp'])} - {first_session['game']}")
+    if last_session:
+        print(f"  Last session:  {format_timestamp(last_session['timestamp'])} - {last_session['game']}")
 
 
 def validate_event_sequences(prefix, events, result):
