@@ -36,8 +36,17 @@ Exit codes: `0` = pass (warnings OK), `1` = errors found, `2` = usage/loading er
 - **Users with 0 titles** are skipped in imported data
 - **`firstPlayed`**: From Nintendo PDM system API (`first_timestamp_user`), typically matches first `Account Login` event
 - **`lastPlayed`**: From Nintendo PDM system API (`last_timestamp_user`), typically matches last `Lost Focus` event, but may differ if PDM has data from sessions not captured in the events array
-- **`launches`**: Count of `Launched` events
-- **`playtime`**: Sum of `Gained Focus` → `Lost Focus` durations
+- **`launches`**: Count of sessions (Launched events), not raw event count
+- **`playtime`**: Sum of `Gained Focus` → `Lost Focus` durations (uses steadyTimestamp for accuracy)
+
+## Important: Import Behavior
+
+**Always modify `import.json`, NOT `importedData.json`.**
+
+- ImportJob handles user matching by name, event validation, and summary validation
+- Creating importedData.json bypasses these validations
+- ImportJob overwrites importedData.json completely on each import
+- Cross-console migration relies on ImportJob's user name matching
 
 ### Session Structure
 
