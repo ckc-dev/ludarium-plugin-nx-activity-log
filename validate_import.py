@@ -261,7 +261,10 @@ def validate_events(prefix, events, summary, result):
         else:
             result.warn(f"{prefix}: no Account Login events to validate firstPlayed against")
 
-    # lastPlayed matches last "Lost Focus" event (NXAL behavior: ~1-2s before logout)
+    # lastPlayed comes from the Nintendo PDM system API (last_timestamp_user), NOT from
+    # iterating over events. It typically matches the last "Lost Focus" event (85% of titles),
+    # but may differ if PDM has data from sessions not captured in the events array.
+    # We warn on mismatches since they're expected in some cases.
     lp = summary.get("lastPlayed") if summary else None
     if lp is not None:
         last_focus = next(

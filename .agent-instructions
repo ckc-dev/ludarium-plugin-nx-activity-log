@@ -1,0 +1,70 @@
+# Agent Instructions for NX-ActivityLog
+
+## Project Overview
+
+This repository contains validation and verification scripts for [NX-ActivityLog](https://github.com/tallbl0nde/NX-ActivityLog) export data. The app exports Nintendo Switch activity logs as JSON files that can be imported back into the app.
+
+## File Structure
+
+| File | Purpose |
+|---|---|
+| `import.json` | Raw export from NXAL (human-readable hex IDs, string event types) |
+| `importedData.json` | Processed output after NXAL import (numeric IDs, integer event types) |
+| `nxal_common.py` | Shared constants, utilities, and `VerificationResult` class |
+| `verify_import.py` | Verifies `importedData.json` was correctly derived from `import.json` |
+| `validate_import.py` | Validates `import.json` structural and data integrity standalone |
+| `README.md` | Documentation of file formats and script usage |
+
+## Script Usage
+
+```bash
+# Validate an import file before importing
+python3 validate_import.py import.json
+
+# Verify import matches imported data
+python3 verify_import.py import.json importedData.json
+```
+
+Exit codes: `0` = pass (warnings OK), `1` = errors found, `2` = usage/loading error.
+
+## Key Data Format Facts
+
+- **User IDs**: 32-char hex in import, split into `[int, int]` in imported data
+- **Game IDs**: 16-char hex in import, single `int` in imported data
+- **Event types**: `"Launched"→0`, `"Closed"→1`, `"Gained Focus"→2`, `"Lost Focus"→3`, `"Account Login"→4`, `"Account Logout"→5`
+- **User matching**: NXAL matches by **display name**, not ID (enables cross-console migration)
+- **Users with 0 titles** are skipped in imported data
+- **`firstPlayed`**: From Nintendo PDM system API (`first_timestamp_user`), typically matches first `Account Login` event
+- **`lastPlayed`**: From Nintendo PDM system API (`last_timestamp_user`), typically matches last `Lost Focus` event, but may differ if PDM has data from sessions not captured in the events array
+- **`launches`**: Count of `Launched` events
+- **`playtime`**: Sum of `Gained Focus` → `Lost Focus` durations
+
+### Session Structure
+
+Each play session follows this event sequence:
+```
+Launched → Gained Focus → Account Login → [Lost Focus → Gained Focus]* → Account Logout → Closed
+```
+
+- `Launched` → `Account Login`: ~2-5 seconds (user selects profile)
+- Final `Lost Focus` → `Account Logout`: ~1-2 seconds
+- Incomplete sessions (no `Closed`) occur when console loses power/network before logout
+
+## Development Conventions
+
+- **Language**: Python 3, no external dependencies
+- **Style**: Match existing code style in each file
+- **Shared code**: Use `nxal_common.py` for constants and utilities shared across scripts
+- **Severity levels**: Use `error` for data correctness issues, `warn` for expected behaviors or cosmetic differences
+- **Testing**: Run scripts against both `import.json` and the backup at `/storage/Backup Arch/Switch OLED Backup pre-update/switch/NX-Activity-Log/` to verify
+
+## Git Conventions
+
+- Use [Conventional Commits](https://www.conventionalcommits.org/) format
+- Prefix with: `feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`
+- Always run `python3 verify_import.py` and `python3 validate_import.py` before committing changes to scripts
+- Never commit `import.json` or `importedData.json` (they contain personal data)
+
+## When Updating This File
+
+When making significant changes to the codebase (new scripts, new conventions, changed data format understanding), update this file to reflect the changes so future agents have accurate context.
