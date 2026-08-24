@@ -244,26 +244,41 @@ def validate_events(prefix, events, summary, result):
     else:
         result.warn(f"{prefix}: events NOT sorted by clockTimestamp")
 
-    # firstPlayed matches earliest event
+    # firstPlayed matches first "Account Login" event (NXAL behavior)
     fp = summary.get("firstPlayed") if summary else None
     if fp is not None:
-        earliest = timestamps[0]
-        if fp == earliest:
-            result.ok(f"{prefix}: summary.firstPlayed == earliest event ({fp})")
+        first_login = next(
+            (ev["clockTimestamp"] for ev in events if ev["type"] == "Account Login"),
+            None,
+        )
+        if first_login is not None:
+            if fp == first_login:
+                result.ok(f"{prefix}: summary.firstPlayed == first Account Login ({fp})")
+            else:
+                result.warn(
+                    f"{prefix}: summary.firstPlayed ({fp}) != first Account Login ({first_login})"
+                )
         else:
-            result.warn(
-                f"{prefix}: summary.firstPlayed ({fp}) != earliest event ({earliest})"
-            )
+            result.warn(f"{prefix}: no Account Login events to validate firstPlayed against")
 
-    # lastPlayed matches latest event
+    # lastPlayed matches last "Lost Focus" event (NXAL behavior: ~1-2s before logout)
     lp = summary.get("lastPlayed") if summary else None
     if lp is not None:
-        latest = timestamps[-1]
-        if lp == latest:
-            result.ok(f"{prefix}: summary.lastPlayed == latest event ({lp})")
+        last_focus = next(
+            (ev["clockTimestamp"] for ev in reversed(events) if ev["type"] == "Lost Focus"),
+            None,
+        )
+        if last_focus is not None:
+            if lp == last_focus:
+                result.ok(f"{prefix}: summary.lastPlayed == last Lost Focus ({lp})")
+            else:
+                result.warn(
+                    f"{prefix}: summary.lastPlayed ({lp}) != last Lost Focus ({last_focus})"
+                )
         else:
+            last_event = timestamps[-1]
             result.warn(
-                f"{prefix}: summary.lastPlayed ({lp}) != latest event ({latest})"
+                f"{prefix}: no Lost Focus events, lastPlayed ({lp}) vs last event ({last_event})"
             )
 
     # launches == count of "Launched" events
