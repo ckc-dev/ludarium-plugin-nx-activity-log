@@ -48,6 +48,14 @@ Exit codes: `0` = pass (warnings OK), `1` = errors found, `2` = usage/loading er
 - ImportJob overwrites importedData.json completely on each import
 - Cross-console migration relies on ImportJob's user name matching
 
+## PDM Quirks
+
+Nintendo Switch PDM firmware has known logging artifacts:
+- Consecutive duplicate `Lost Focus` events — NXAL collapses these
+- Consecutive duplicate `Account Logout` events — NXAL does NOT deduplicate
+- Consecutive duplicate `Closed` events — NXAL does NOT deduplicate
+- Orphaned `Lost Focus` events (no preceding `Gained Focus`) — PDM sometimes omits the Gained Focus
+
 ### Session Structure
 
 Each play session follows this event sequence:
