@@ -239,6 +239,15 @@ def validate_events(prefix, events, summary, result):
     if not valid_types:
         return
 
+    # Check for duplicate events (PDM logging artifact, not a real error)
+    seen_events = {}
+    for i, ev in enumerate(events):
+        key = (ev["type"], ev["clockTimestamp"])
+        if key in seen_events:
+            result.warn(f"{prefix}: duplicate event at index {i} (same as index {seen_events[key]})")
+        else:
+            seen_events[key] = i
+
     # Events sorted by clockTimestamp
     timestamps = [ev["clockTimestamp"] for ev in events]
     if timestamps == sorted(timestamps):
@@ -380,6 +389,8 @@ def validate_event_sequences(prefix, events, result):
     launched_count = 0
     closed_count = 0
     focus_depth = 0
+    orphaned_lost = 0
+    last_type = None
 
     for i, ev in enumerate(events):
         et = ev["type"]
@@ -396,12 +407,16 @@ def validate_event_sequences(prefix, events, result):
         elif et == "Gained Focus":
             focus_depth += 1
         elif et == "Lost Focus":
+            if focus_depth <= 0:
+                orphaned_lost += 1
             focus_depth -= 1
-            if focus_depth < 0:
-                result.error(
-                    f"{prefix}: 'Lost Focus' at event#{i} without preceding 'Gained Focus'"
-                )
-                return
+
+        last_type = et
+
+    if orphaned_lost > 0:
+        result.warn(
+            f"{prefix}: {orphaned_lost} 'Lost Focus' event(s) without preceding 'Gained Focus' (PDM artifact)"
+        )
 
     if launched_count > 0:
         result.ok(
