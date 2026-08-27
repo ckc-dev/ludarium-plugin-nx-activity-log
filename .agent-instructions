@@ -6,14 +6,14 @@ This repository contains validation and verification scripts for [NX-ActivityLog
 
 ## File Structure
 
-| File | Purpose |
-|---|---|
-| `import.json` | Raw export from NXAL (human-readable hex IDs, string event types) |
-| `importedData.json` | Processed output after NXAL import (numeric IDs, integer event types) |
-| `nxal_common.py` | Shared constants, utilities, and `VerificationResult` class |
-| `verify_import.py` | Verifies `importedData.json` was correctly derived from `import.json` |
-| `validate_import.py` | Validates `import.json` structural and data integrity standalone |
-| `README.md` | Documentation of file formats and script usage |
+| File                 | Purpose                                                               |
+| -------------------- | --------------------------------------------------------------------- |
+| `import.json`        | Raw export from NXAL (human-readable hex IDs, string event types)     |
+| `importedData.json`  | Processed output after NXAL import (numeric IDs, integer event types) |
+| `nxal_common.py`     | Shared constants, utilities, and `VerificationResult` class           |
+| `verify_import.py`   | Verifies `importedData.json` was correctly derived from `import.json` |
+| `validate_import.py` | Validates `import.json` structural and data integrity standalone      |
+| `README.md`          | Documentation of file formats and script usage                        |
 
 ## Script Usage
 
@@ -73,7 +73,7 @@ Launched → Gained Focus → Account Login → [Lost Focus → Gained Focus]* �
 - **Style**: Match existing code style in each file
 - **Shared code**: Use `nxal_common.py` for constants and utilities shared across scripts
 - **Severity levels**: Use `error` for data correctness issues, `warn` for expected behaviors or cosmetic differences
-- **Testing**: Run scripts against both `import.json` and the backup at `/storage/Backup Arch/Switch OLED Backup pre-update/switch/NX-Activity-Log/` to verify
+- **Testing**: Run scripts against export JSON files to verify correctness
 
 ## Git Conventions
 
