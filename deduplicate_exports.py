@@ -29,6 +29,7 @@ from nxal_common import (
     event_key,
     first_last_from_events,
     load_json,
+    normalize_export,
     sort_events,
 )
 
@@ -277,7 +278,7 @@ def main():
         new_data, stats = rebuild_export(data, ownership, export_idx)
 
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(new_data, f, indent=4)
+            json.dump(normalize_export(new_data), f, indent=4)
 
         basename = os.path.basename(path)
         sessions_removed = stats["sessions_before"] - stats["sessions_after"]

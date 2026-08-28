@@ -22,6 +22,7 @@ from nxal_common import (
     deduplicate_events,
     first_last_from_events,
     load_json,
+    normalize_export,
     sort_events,
 )
 
@@ -165,7 +166,7 @@ def main():
     }
 
     with open(output_path, "w") as f:
-        json.dump(result, f, indent=4)
+        json.dump(normalize_export(result), f, indent=4)
 
     print(f"\nMerged output: {output_path}")
     print(f"  Users: {len(merged_users)}")

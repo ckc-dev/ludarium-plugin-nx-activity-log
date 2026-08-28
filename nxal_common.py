@@ -157,6 +157,60 @@ def sort_events(events):
     return sorted(events, key=lambda e: (e.get("clockTimestamp", 0), e.get("steadyTimestamp", 0)))
 
 
+def normalize_export(data):
+    """Rebuild an export dict with a fixed, canonical key order.
+
+    Different code paths build title/user dicts in different orders (the
+    source exports write "events" first; merge_title rebuilds as
+    id/name/summary/events; deduplicate_exports as id/name/summary/events),
+    and titles that are passed through untouched keep their original order.
+    That makes two runs over the same data byte-differ even though the
+    parsed contents are identical. Normalizing before serialization makes
+    merge and dedup output byte-identical and order-independent.
+    """
+    SUMMARY_ORDER = ("firstPlayed", "lastPlayed", "launches", "playtime")
+    TITLE_ORDER = ("id", "name", "summary", "events")
+    USER_ORDER = ("id", "name", "titles")
+
+    def ordered(obj, order):
+        canonical = {k: obj[k] for k in order if k in obj}
+        canonical.update({k: v for k, v in obj.items() if k not in order})
+        return canonical
+
+    def norm_event(ev):
+        if not isinstance(ev, dict):
+            return ev
+        return {k: ev[k] for k in ("clockTimestamp", "steadyTimestamp", "type") if k in ev}
+
+    def norm_title(t):
+        if not isinstance(t, dict):
+            return t
+        out = ordered(t, TITLE_ORDER)
+        if "summary" in out and isinstance(out["summary"], dict):
+            out["summary"] = ordered(out["summary"], SUMMARY_ORDER)
+        if "events" in out and isinstance(out["events"], list):
+            out["events"] = [norm_event(e) for e in out["events"]]
+        return out
+
+    def norm_user(u):
+        if not isinstance(u, dict):
+            return u
+        out = ordered(u, USER_ORDER)
+        if "titles" in out and isinstance(out["titles"], list):
+            out["titles"] = [norm_title(t) for t in out["titles"]]
+        return out
+
+    def norm_top(d):
+        if not isinstance(d, dict):
+            return d
+        out = ordered(d, ("exportString", "exportTimestamp", "exportVersion", "users"))
+        if "users" in out and isinstance(out["users"], list):
+            out["users"] = [norm_user(u) for u in out["users"]]
+        return out
+
+    return norm_top(data)
+
+
 def first_last_from_events(events, fallback_first=0, fallback_last=0):
     """Compute summary firstPlayed/lastPlayed from events (NXAL semantics).
 
