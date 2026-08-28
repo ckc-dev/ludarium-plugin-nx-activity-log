@@ -49,6 +49,22 @@ Exit codes: `0` = pass (warnings OK), `1` = errors found, `2` = usage/loading er
 - ImportJob overwrites importedData.json completely on each import
 - Cross-console migration relies on ImportJob's user name matching
 
+## Event Identity: detect vs. remove (use the right key)
+
+NXAL considers two events "the same" by a 5-field check (`type`, `titleID`, `eventType`,
+`clockTimestamp`, `steadyTimestamp` — `PlayData.cpp:386-388`). At the title/user level the
+remaining NXAL identity key is **`(type, clockTimestamp, steadyTimestamp)`** (3-field).
+`steadyTimestamp` is the monotonic boot clock and is NOT redundant with `clockTimestamp`:
+events can share a wall-clock second yet be distinct (e.g. across a reboot).
+
+- **Removal/dedup** (merge, deduplicate, fix_import deleting events) must use the strict
+  **3-field** key — see `deduplicate_events(events, key_fields)` / `MERGE_DEDUP_KEY`.
+- **Detection/flagging** (`find_duplicate_events`) uses a broader **2-field**
+  `(type, clockTimestamp)` heuristic to surface likely PDM double-log artifacts as
+  warnings. It is for flagging only, never for deletion.
+- `deduplicate_events` and `find_duplicate_events` are intentionally different; do not
+  conflate them. Both live in `nxal_common.py`.
+
 ## PDM Quirks
 
 Nintendo Switch PDM firmware has known logging artifacts:
