@@ -27,6 +27,7 @@ from nxal_common import (
     calculate_playtime,
     count_launches,
     event_key,
+    first_last_from_events,
     load_json,
     sort_events,
 )
@@ -185,12 +186,23 @@ def rebuild_export(data, ownership, export_idx):
                 total_events_after += len(new_events)
 
                 summary = title.get("summary", {})
+                first_played, last_played = first_last_from_events(
+                    new_events,
+                    # NXAL/PDM reports firstPlayed/lastPlayed as the first
+                    # "Account Login" and last "Lost Focus" events, NOT the
+                    # raw Launched...Closed extremes. Earlier versions took
+                    # new_events[0]/[-1] here, which widened the span beyond
+                    # what NXAL would report and so diverged from a plain
+                    # merge of the same exports (see first_last_from_events).
+                    fallback_first=summary.get("firstPlayed", 0),
+                    fallback_last=summary.get("lastPlayed", 0),
+                )
                 new_titles.append({
                     "id": title_id,
                     "name": title.get("name", ""),
                     "summary": {
-                        "firstPlayed": new_events[0]["clockTimestamp"] if new_events else summary.get("firstPlayed", 0),
-                        "lastPlayed": new_events[-1]["clockTimestamp"] if new_events else summary.get("lastPlayed", 0),
+                        "firstPlayed": first_played,
+                        "lastPlayed": last_played,
                         "launches": count_launches(new_events),
                         "playtime": calculate_playtime(new_events),
                     },

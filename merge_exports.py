@@ -20,6 +20,7 @@ from nxal_common import (
     calculate_playtime,
     count_launches,
     deduplicate_events,
+    first_last_from_events,
     load_json,
     sort_events,
 )
@@ -84,28 +85,29 @@ def merge_title(target, source):
 
 
 def merge_summary(target, source, events):
-    """Merge two summary objects, recalculating from merged events."""
-    fp_target = target.get("firstPlayed")
-    fp_source = source.get("firstPlayed")
-    lp_target = target.get("lastPlayed")
-    lp_source = source.get("lastPlayed")
+    """Merge two summary objects, recomputing from merged events.
 
-    if fp_target is not None and fp_source is not None:
-        first_played = min(fp_target, fp_source)
-    else:
-        first_played = fp_target if fp_target is not None else fp_source
-
-    if lp_target is not None and lp_source is not None:
-        last_played = max(lp_target, lp_source)
-    else:
-        last_played = lp_target if lp_target is not None else lp_source
+    firstPlayed/lastPlayed are ALWAYS recomputed from the merged events,
+    never inherited from the inputs. NXAL/PDM reports these as the first
+    "Account Login" and last "Lost Focus" events (see
+    first_last_from_events); taking min/max of the inputs' stored summaries
+    instead would silently inherit whatever drift the input files carry
+    (e.g. summary edits or readded sessions), making output
+    order-dependent and unfaithful. The input summaries are kept only as
+    the empty-events fallback.
+    """
+    first_played, last_played = first_last_from_events(
+        events,
+        fallback_first=target.get("firstPlayed") or source.get("firstPlayed") or 0,
+        fallback_last=target.get("lastPlayed") or source.get("lastPlayed") or 0,
+    )
 
     launches = count_launches(events)
     playtime = calculate_playtime(events)
 
     return {
-        "firstPlayed": first_played or 0,
-        "lastPlayed": last_played or 0,
+        "firstPlayed": first_played,
+        "lastPlayed": last_played,
         "launches": launches,
         "playtime": playtime,
     }

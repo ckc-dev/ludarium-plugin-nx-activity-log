@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """
 nxal_common.py — Shared utilities for NX-ActivityLog verification scripts.
+
+Provides the canonical helpers shared across validate/fix/merge/dedup so
+they cannot drift apart: event identity (event_key/deduplicate_events),
+deterministic ordering (sort_events), summary recomputation
+(first_last_from_events), playtime/launch accounting, and the PDM-artifact
+detectors (find_duplicate_events/find_orphaned_lost_focus).
 """
 
 import json
@@ -149,6 +155,50 @@ def sort_events(events):
     not depend on input ordering.
     """
     return sorted(events, key=lambda e: (e.get("clockTimestamp", 0), e.get("steadyTimestamp", 0)))
+
+
+def first_last_from_events(events, fallback_first=0, fallback_last=0):
+    """Compute summary firstPlayed/lastPlayed from events (NXAL semantics).
+
+    NXAL does NOT derive these from the events array. In
+    getStatisticsForUser (PlayData.cpp:529-542) they come straight from
+    the Nintendo Switch PDM firmware database
+    (pdmqryQueryPlayStatisticsByApplicationIdAndUserAccountId) as
+    first_timestamp_user / last_timestamp_user, falling back to the
+    imported summary only when PDM returns 0/0.
+
+    Empirically (verified against a pristine export), those PDM values map
+    to the first "Account Login" event and the last "Lost Focus" event —
+    NOT the raw Launched...Closed extremes. So when a tool must produce a
+    summary, we recompute from the events with those semantics so the
+    result stays faithful to what NXAL would report.
+
+    Fallbacks (when the canonical event is absent):
+      - no "Account Login"  -> earliest event's clockTimestamp
+      - no "Lost Focus"     -> latest event's clockTimestamp
+      - no events at all    -> the passed fallback values (source summary)
+
+    Caveat: PDM can hold data from sessions not captured in the events
+    array, so event-derived values are the best available proxy, not an
+    exact reproduction of PDM (this most often affects lastPlayed).
+    """
+    if not events:
+        return fallback_first, fallback_last
+
+    first_login = next(
+        (ev["clockTimestamp"] for ev in events if ev["type"] == "Account Login"), None
+    )
+    last_focus = next(
+        (ev["clockTimestamp"] for ev in reversed(events) if ev["type"] == "Lost Focus"),
+        None,
+    )
+
+    earliest = min(ev["clockTimestamp"] for ev in events)
+    latest = max(ev["clockTimestamp"] for ev in events)
+
+    first_played = first_login if first_login is not None else earliest
+    last_played = last_focus if last_focus is not None else latest
+    return first_played, last_played
 
 
 def format_timestamp(ts):
