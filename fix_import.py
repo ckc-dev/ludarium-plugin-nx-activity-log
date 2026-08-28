@@ -56,9 +56,10 @@ def find_focus_errors(events):
         if ev["type"] == "Gained Focus":
             focus_depth += 1
         elif ev["type"] == "Lost Focus":
-            if focus_depth <= 0:
+            if focus_depth > 0:
+                focus_depth -= 1
+            else:
                 errors.append(i)
-            focus_depth -= 1
 
     return errors
 
@@ -316,6 +317,7 @@ def main():
 
             print(f"  == {title_name} ==")
 
+            title_fixes = 0
             fixed_launches = False
             fixed_playtime = False
 
@@ -327,6 +329,7 @@ def main():
                 if focus_indices:
                     events, fixed = fix_focus_errors(events, title_name)
                     if fixed:
+                        title_fixes += 1
                         fixes_applied += 1
                         changed = True
                         continue
@@ -334,6 +337,7 @@ def main():
                 if FIX_WARNINGS and find_out_of_order(events):
                     events, fixed = fix_out_of_order(events)
                     if fixed:
+                        title_fixes += 1
                         fixes_applied += 1
                         changed = True
                         continue
@@ -342,6 +346,7 @@ def main():
                 if duplicates:
                     events, fixed = fix_duplicate_events(events)
                     if fixed:
+                        title_fixes += 1
                         fixes_applied += 1
                         changed = True
                         continue
@@ -350,12 +355,14 @@ def main():
                 if nulls:
                     events, fixed = fix_null_fields(events)
                     if fixed:
+                        title_fixes += 1
                         fixes_applied += 1
                         changed = True
                         continue
 
                 summary, fixed_launches = fix_launches(summary, events)
                 if fixed_launches:
+                    title_fixes += 1
                     fixes_applied += 1
                     changed = True
                     continue
@@ -363,6 +370,7 @@ def main():
                 if FIX_WARNINGS:
                     summary, fixed_playtime = fix_playtime(summary, events)
                     if fixed_playtime:
+                        title_fixes += 1
                         fixes_applied += 1
                         changed = True
                         continue
@@ -370,9 +378,12 @@ def main():
             title["events"] = events
             title["summary"] = summary
 
-            if not any([focus_indices, find_out_of_order(events),
-                        find_duplicate_events(events), find_null_fields(events),
-                        fixed_launches, fixed_playtime]):
+            if title_fixes == 0 and not any([
+                find_focus_errors(events),
+                find_out_of_order(events),
+                find_duplicate_events(events),
+                find_null_fields(events),
+            ]):
                 print(f"    No errors found")
 
         print()

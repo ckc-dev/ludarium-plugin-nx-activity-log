@@ -335,6 +335,11 @@ def validate_events(prefix, events, summary, result):
 
 
 def calculate_playtime(events):
+    """Calculate playtime from focus events.
+
+    Only counts completed focus periods (Gained Focus → Lost Focus).
+    Unclosed sessions are ignored since we can't know when they ended.
+    """
     playtime = 0
     last_focus_start = None
     for ev in events:
@@ -343,8 +348,6 @@ def calculate_playtime(events):
         elif ev["type"] == "Lost Focus" and last_focus_start is not None:
             playtime += ev["clockTimestamp"] - last_focus_start
             last_focus_start = None
-    if last_focus_start is not None:
-        playtime += int(time.time()) - last_focus_start
     return playtime
 
 
@@ -403,13 +406,13 @@ def validate_event_sequences(prefix, events, result):
                 result.error(
                     f"{prefix}: 'Closed' at event#{i} without preceding 'Launched'"
                 )
-                return
         elif et == "Gained Focus":
             focus_depth += 1
         elif et == "Lost Focus":
-            if focus_depth <= 0:
+            if focus_depth > 0:
+                focus_depth -= 1
+            else:
                 orphaned_lost += 1
-            focus_depth -= 1
 
         last_type = et
 

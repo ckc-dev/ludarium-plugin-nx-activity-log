@@ -68,7 +68,7 @@ def merge_title(target, source):
 
 
 def deduplicate_events(events):
-    """Remove duplicate events by 5-field match."""
+    """Remove duplicate events by 3-field match (type, clockTimestamp, steadyTimestamp)."""
     seen = set()
     unique = []
 
@@ -88,20 +88,27 @@ def deduplicate_events(events):
 
 def merge_summary(target, source, events):
     """Merge two summary objects, recalculating from merged events."""
-    fp_target = target.get("firstPlayed", 0)
-    fp_source = source.get("firstPlayed", 0)
-    lp_target = target.get("lastPlayed", 0)
-    lp_source = source.get("lastPlayed", 0)
+    fp_target = target.get("firstPlayed")
+    fp_source = source.get("firstPlayed")
+    lp_target = target.get("lastPlayed")
+    lp_source = source.get("lastPlayed")
 
-    first_played = min(fp_target, fp_source) if (fp_target and fp_source) else (fp_target or fp_source)
-    last_played = max(lp_target, lp_source) if (lp_target and lp_source) else (lp_target or lp_source)
+    if fp_target is not None and fp_source is not None:
+        first_played = min(fp_target, fp_source)
+    else:
+        first_played = fp_target if fp_target is not None else fp_source
+
+    if lp_target is not None and lp_source is not None:
+        last_played = max(lp_target, lp_source)
+    else:
+        last_played = lp_target if lp_target is not None else lp_source
 
     launches = count_launches(events)
     playtime = calculate_playtime(events)
 
     return {
-        "firstPlayed": first_played,
-        "lastPlayed": last_played,
+        "firstPlayed": first_played or 0,
+        "lastPlayed": last_played or 0,
         "launches": launches,
         "playtime": playtime,
     }
@@ -128,7 +135,7 @@ def merge_metadata(inputs):
     latest_ts = max(d.get("exportTimestamp", 0) for d in inputs)
     latest_str = max((d.get("exportString", "") for d in inputs), key=lambda s: s)
     versions = set(d.get("exportVersion", "") for d in inputs)
-    version = max(versions) if versions else "unknown"
+    version = max(versions, key=lambda v: tuple(int(x) for x in v.split(".") if x.isdigit())) if versions else "unknown"
 
     return {
         "exportString": f"{latest_str} (merged from {len(inputs)} exports)",
