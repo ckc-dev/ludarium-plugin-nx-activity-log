@@ -20,7 +20,6 @@ Exit code: 0 on success, 1 on error.
 
 import sys
 import os
-import json
 import shutil
 
 from nxal_common import (
@@ -29,8 +28,8 @@ from nxal_common import (
     event_key,
     first_last_from_events,
     load_json,
-    normalize_export,
     sort_events,
+    write_export_json,
 )
 
 # Session identity uses the same 3-field NXAL key as merge_exports
@@ -277,9 +276,7 @@ def main():
 
         new_data, stats = rebuild_export(data, ownership, export_idx)
 
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(normalize_export(new_data), f, indent=4)
-
+        write_export_json(path, new_data)
         basename = os.path.basename(path)
         sessions_removed = stats["sessions_before"] - stats["sessions_after"]
         events_removed = stats["events_before"] - stats["events_after"]

@@ -13,7 +13,6 @@ Exit code: 0 on success, 1 on error.
 """
 
 import sys
-import json
 import os
 
 from nxal_common import (
@@ -22,8 +21,8 @@ from nxal_common import (
     deduplicate_events,
     first_last_from_events,
     load_json,
-    normalize_export,
     sort_events,
+    write_export_json,
 )
 
 # NXAL deduplicates events on import/merge by a 5-field match:
@@ -165,8 +164,7 @@ def main():
         "users": merged_users,
     }
 
-    with open(output_path, "w") as f:
-        json.dump(normalize_export(result), f, indent=4)
+    write_export_json(output_path, result)
 
     print(f"\nMerged output: {output_path}")
     print(f"  Users: {len(merged_users)}")

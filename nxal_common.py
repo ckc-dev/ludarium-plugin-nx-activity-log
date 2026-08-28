@@ -158,57 +158,38 @@ def sort_events(events):
 
 
 def normalize_export(data):
-    """Rebuild an export dict with a fixed, canonical key order.
+    """Deep-sort dict keys alphabetically to match NXAL export output.
 
-    Different code paths build title/user dicts in different orders (the
-    source exports write "events" first; merge_title rebuilds as
-    id/name/summary/events; deduplicate_exports as id/name/summary/events),
-    and titles that are passed through untouched keep their original order.
-    That makes two runs over the same data byte-differ even though the
-    parsed contents are identical. Normalizing before serialization makes
-    merge and dedup output byte-identical and order-independent.
+    NXAL serializes export JSON with nlohmann::json, whose default
+    container (std::map) writes keys in sorted/alphabetical order
+    (Application.ExportJob.cpp). So a pristine NXAL export always has
+    title keys as (events, id, name, summary), user keys as (id, name,
+    titles), etc. Our merge/dedup rebuild dicts in varying insertion
+    orders and pass some titles through untouched, so two runs over the
+    same data can byte-differ even when the parsed content is identical.
+    Sorting every dict's keys here normalizes all outputs to be
+    byte-identical to each other AND to an NXAL export.
     """
-    SUMMARY_ORDER = ("firstPlayed", "lastPlayed", "launches", "playtime")
-    TITLE_ORDER = ("id", "name", "summary", "events")
-    USER_ORDER = ("id", "name", "titles")
+    if isinstance(data, dict):
+        return {k: normalize_export(v) for k, v in sorted(data.items())}
+    if isinstance(data, list):
+        return [normalize_export(v) for v in data]
+    return data
 
-    def ordered(obj, order):
-        canonical = {k: obj[k] for k in order if k in obj}
-        canonical.update({k: v for k, v in obj.items() if k not in order})
-        return canonical
 
-    def norm_event(ev):
-        if not isinstance(ev, dict):
-            return ev
-        return {k: ev[k] for k in ("clockTimestamp", "steadyTimestamp", "type") if k in ev}
+def write_export_json(path, data):
+    """Write an export to `path` byte-compatible with a NXAL export.
 
-    def norm_title(t):
-        if not isinstance(t, dict):
-            return t
-        out = ordered(t, TITLE_ORDER)
-        if "summary" in out and isinstance(out["summary"], dict):
-            out["summary"] = ordered(out["summary"], SUMMARY_ORDER)
-        if "events" in out and isinstance(out["events"], list):
-            out["events"] = [norm_event(e) for e in out["events"]]
-        return out
-
-    def norm_user(u):
-        if not isinstance(u, dict):
-            return u
-        out = ordered(u, USER_ORDER)
-        if "titles" in out and isinstance(out["titles"], list):
-            out["titles"] = [norm_title(t) for t in out["titles"]]
-        return out
-
-    def norm_top(d):
-        if not isinstance(d, dict):
-            return d
-        out = ordered(d, ("exportString", "exportTimestamp", "exportVersion", "users"))
-        if "users" in out and isinstance(out["users"], list):
-            out["users"] = [norm_user(u) for u in out["users"]]
-        return out
-
-    return norm_top(data)
+    NXAL writes export.json using nlohmann::json.dump(4) then a trailing
+    std::endl (Application.ExportJob.cpp:118). Reading a NXAL file back
+    with json.load and re-dumping must reproduce it byte-for-byte, so we:
+      - sort keys (see normalize_export — nlohmann std::map sorts keys),
+      - keep UTF-8 literal with ensure_ascii=False (NXAL does not escape
+        non-ASCII title/name characters), and
+      - append a trailing newline (the << std::endl).
+    """
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(json.dumps(normalize_export(data), indent=4, ensure_ascii=False) + "\n")
 
 
 def first_last_from_events(events, fallback_first=0, fallback_last=0):
