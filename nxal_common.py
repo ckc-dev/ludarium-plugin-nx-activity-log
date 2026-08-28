@@ -76,6 +76,12 @@ def find_duplicate_events(events):
 
     PDM logging artifact. Returns a list of (index, first_index, event)
     for each occurrence after the first.
+
+    This is a broad 2-field *detection* heuristic used to flag potential
+    PDM double-log artifacts (warnings), NOT a safe removal key. To
+    actually delete duplicates use deduplicate_events with the strict
+    3-field (type, clockTimestamp, steadyTimestamp) NXAL identity key —
+    see the note there.
     """
     seen = {}
     duplicates = []
@@ -104,6 +110,45 @@ def find_orphaned_lost_focus(events):
             else:
                 orphans.append(i)
     return orphans
+
+
+def event_key(ev, key_fields):
+    """Build a dedup identity tuple for an event from the given field names.
+
+    key_fields is a tuple of event field names (e.g. ("type",
+    "clockTimestamp", "steadyTimestamp")). Missing fields become None.
+    """
+    return tuple(ev.get(f) for f in key_fields)
+
+
+def deduplicate_events(events, key_fields):
+    """Remove duplicate events by a caller-specified key.
+
+    Only removes events that are identical across `key_fields`. This is
+    distinct from `find_duplicate_events` (the 2-field PDM-artifact
+    detector): removal must be strict so that two genuinely different
+    events (e.g. the same wall-clock second logged before and after a
+    console reboot, which differ in steadyTimestamp) are never deleted.
+    """
+    seen = set()
+    unique = []
+    for ev in events:
+        key = event_key(ev, key_fields)
+        if key not in seen:
+            seen.add(key)
+            unique.append(ev)
+    return unique
+
+
+def sort_events(events):
+    """Return `events` sorted by (clockTimestamp, steadyTimestamp).
+
+    Two-level sort gives a deterministic byte order even when multiple
+    events share the same clockTimestamp (e.g. NXAL consecutive events
+    logged within the same second), so merged/deduplicated output does
+    not depend on input ordering.
+    """
+    return sorted(events, key=lambda e: (e.get("clockTimestamp", 0), e.get("steadyTimestamp", 0)))
 
 
 def format_timestamp(ts):

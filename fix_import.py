@@ -23,6 +23,7 @@ import shutil
 from nxal_common import (
     calculate_playtime,
     count_launches,
+    deduplicate_events,
     find_duplicate_events,
     find_first_last_launch,
     find_orphaned_lost_focus,
@@ -89,35 +90,52 @@ def fix_out_of_order(events):
     return events, True
 
 
+# Removal uses the strict 3-field NXAL identity key (same as merge_exports).
+# find_duplicate_events below is only the broad 2-field *detection* heuristic
+# used to surface potential PDM artifacts to the user; actually deleting events
+# must require steadyTimestamp too, or we risk removing genuinely distinct
+# events (e.g. same wall-clock second across a reboot, differing in steady).
+REMOVE_DUP_KEY = ("type", "clockTimestamp", "steadyTimestamp")
+
+
 def fix_duplicate_events(events):
-    """Remove duplicate events."""
+    """Remove duplicate events.
+
+    Only events identical under the strict 3-field NXAL identity key are
+    removed, so distinct events that merely share (type, clockTimestamp)
+    are never deleted.
+    """
     duplicates = find_duplicate_events(events)
     if not duplicates:
         return events, False
 
-    print(f"\n  Found {len(duplicates)} duplicate event(s):")
+    # Detect what WOULD be flagged by the broad key, then compute how many
+    # are truly removable under the strict key (keeps first occurrence).
+    pre_count = len(events)
+    fixed_events = deduplicate_events(events, REMOVE_DUP_KEY)
+    removed = pre_count - len(fixed_events)
+
+    print(f"\n  Found {len(duplicates)} potential duplicate event(s) (PDM artifact):")
     for idx, _, ev in duplicates[:5]:
         print(f"    [{idx}] {ev['type']} at {format_timestamp(ev['clockTimestamp'])} ({ev['clockTimestamp']})")
     if len(duplicates) > 5:
         print(f"    ... and {len(duplicates) - 5} more")
 
-    print(f"\n  Fix: Remove duplicate events (keep first occurrence)")
+    if removed == 0:
+        print(f"\n  None are true duplicates: all differ in steadyTimestamp, so they are")
+        print(f"  distinct events (e.g. across a reboot) and none are removed.")
+        return events, False
+
+    if removed < len(duplicates):
+        print(f"\n  Note: {len(duplicates) - removed} flagged event(s) differ in steadyTimestamp and are")
+        print(f"        distinct events, so they are NOT removed.")
+
+    print(f"\n  Fix: Remove the {removed} event(s) that are true duplicates "
+          f"(same type, clockTimestamp, steadyTimestamp)")
 
     confirm = input("\n  Apply fix? [y/N]: ").strip().lower()
     if confirm != "y":
         return events, False
-
-    seen = set()
-    fixed_events = []
-    removed = 0
-
-    for ev in events:
-        key = (ev["type"], ev["clockTimestamp"])
-        if key not in seen:
-            seen.add(key)
-            fixed_events.append(ev)
-        else:
-            removed += 1
 
     print(f"    + Removed {removed} duplicate event(s)")
     return fixed_events, True

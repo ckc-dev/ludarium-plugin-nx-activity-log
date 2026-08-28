@@ -16,7 +16,22 @@ import sys
 import json
 import os
 
-from nxal_common import calculate_playtime, count_launches, load_json
+from nxal_common import (
+    calculate_playtime,
+    count_launches,
+    deduplicate_events,
+    load_json,
+    sort_events,
+)
+
+# NXAL deduplicates events on import/merge by a 5-field match:
+# (type, titleID, eventType, clockTimestamp, steadyTimestamp) — see
+# PlayData.cpp:386-388. titleID/type are matched at the title/user level,
+# so the remaining identity key here is the 3-tuple below. steadyTimestamp
+# (the monotonic boot clock) is NOT redundant with clockTimestamp: two
+# events can share a wall-clock second yet be distinct (e.g. across a
+# reboot), so it must be kept to avoid deleting real events.
+MERGE_DEDUP_KEY = ("type", "clockTimestamp", "steadyTimestamp")
 
 
 def merge_users(source_users, target_users):
@@ -56,7 +71,8 @@ def merge_title(target, source):
     target_events = target.get("events", [])
     source_events = source.get("events", [])
 
-    merged_events = deduplicate_events(target_events + source_events)
+    merged_events = deduplicate_events(target_events + source_events, MERGE_DEDUP_KEY)
+    merged_events = sort_events(merged_events)
     merged_summary = merge_summary(target.get("summary", {}), source.get("summary", {}), merged_events)
 
     return {
@@ -65,25 +81,6 @@ def merge_title(target, source):
         "summary": merged_summary,
         "events": merged_events,
     }
-
-
-def deduplicate_events(events):
-    """Remove duplicate events by 3-field match (type, clockTimestamp, steadyTimestamp)."""
-    seen = set()
-    unique = []
-
-    for ev in events:
-        key = (
-            ev.get("type"),
-            ev.get("clockTimestamp"),
-            ev.get("steadyTimestamp"),
-        )
-        if key not in seen:
-            seen.add(key)
-            unique.append(ev)
-
-    unique.sort(key=lambda e: e["clockTimestamp"])
-    return unique
 
 
 def merge_summary(target, source, events):

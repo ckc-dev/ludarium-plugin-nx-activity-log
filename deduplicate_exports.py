@@ -23,7 +23,22 @@ import os
 import json
 import shutil
 
-from nxal_common import calculate_playtime, count_launches, load_json
+from nxal_common import (
+    calculate_playtime,
+    count_launches,
+    event_key,
+    load_json,
+    sort_events,
+)
+
+# Session identity uses the same 3-field NXAL key as merge_exports
+# (type, clockTimestamp, steadyTimestamp) applied to the session's
+# 'Launched' marker. This makes deduplicate_exports agree with
+# merge_exports about which events are the "same", so that
+# merge(originalExports) and merge(deduplicatedExports) converge to the
+# same content. Two sessions whose Launched events differ in
+# steadyTimestamp are distinct (e.g. across a reboot) and are both kept.
+SESSION_KEY_FIELDS = ("type", "clockTimestamp", "steadyTimestamp")
 
 
 def extract_sessions(events):
@@ -73,8 +88,15 @@ def extract_sessions(events):
 
 
 def session_key(session, title_id, user_id):
-    """Unique key for a session: (title_id, user_id, start_timestamp)."""
-    return (title_id, user_id, session["start"])
+    """Unique key for a session.
+
+    Uses the 3-field NXAL identity (SESSION_KEY_FIELDS) of the session's
+    'Launched' event, combined with title and user IDs. This matches how
+    merge_exports decides two events are the same, so dedup and merge
+    agree and merge(dedup(x)) converges with merge(x).
+    """
+    launched = session["events"][0]
+    return (title_id, user_id, event_key(launched, SESSION_KEY_FIELDS))
 
 
 def build_session_index(exports):
@@ -158,7 +180,7 @@ def rebuild_export(data, ownership, export_idx):
                 new_events = []
                 for sess in owned_sessions:
                     new_events.extend(sess["events"])
-                new_events.sort(key=lambda e: e["clockTimestamp"])
+                new_events = sort_events(new_events)
 
                 total_events_after += len(new_events)
 
