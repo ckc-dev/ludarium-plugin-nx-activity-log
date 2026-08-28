@@ -325,14 +325,15 @@ def main():
             while changed:
                 changed = False
 
-                focus_indices = find_focus_errors(events)
-                if focus_indices:
-                    events, fixed = fix_focus_errors(events, title_name)
-                    if fixed:
-                        title_fixes += 1
-                        fixes_applied += 1
-                        changed = True
-                        continue
+                if FIX_WARNINGS:
+                    focus_indices = find_focus_errors(events)
+                    if focus_indices:
+                        events, fixed = fix_focus_errors(events, title_name)
+                        if fixed:
+                            title_fixes += 1
+                            fixes_applied += 1
+                            changed = True
+                            continue
 
                 if FIX_WARNINGS and find_out_of_order(events):
                     events, fixed = fix_out_of_order(events)
@@ -379,8 +380,6 @@ def main():
             title["summary"] = summary
 
             if title_fixes == 0 and not any([
-                find_focus_errors(events),
-                find_out_of_order(events),
                 find_duplicate_events(events),
                 find_null_fields(events),
             ]):

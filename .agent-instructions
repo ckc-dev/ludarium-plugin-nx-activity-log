@@ -6,14 +6,15 @@ This repository contains validation and verification scripts for [NX-ActivityLog
 
 ## File Structure
 
-| File                 | Purpose                                                               |
-| -------------------- | --------------------------------------------------------------------- |
-| `import.json`        | Raw export from NXAL (human-readable hex IDs, string event types)     |
-| `importedData.json`  | Processed output after NXAL import (numeric IDs, integer event types) |
-| `nxal_common.py`     | Shared constants, utilities, and `VerificationResult` class           |
-| `verify_import.py`   | Verifies `importedData.json` was correctly derived from `import.json` |
-| `validate_import.py` | Validates `import.json` structural and data integrity standalone      |
-| `README.md`          | Documentation of file formats and script usage                        |
+| File                      | Purpose                                                               |
+| ------------------------- | --------------------------------------------------------------------- |
+| `nxal_common.py`          | Shared constants, utilities, and `VerificationResult` class           |
+| `validate_import.py`      | Validates `import.json` structural and data integrity standalone      |
+| `verify_import.py`        | Verifies `importedData.json` was correctly derived from `import.json` |
+| `fix_import.py`           | Interactive fix script for `import.json` errors                       |
+| `merge_exports.py`        | Merges multiple `import.json` files into one                          |
+| `deduplicate_exports.py`  | Splits overlapping exports into incremental files                     |
+| `README.md`               | Documentation of file formats and script usage                        |
 
 ## Script Usage
 
