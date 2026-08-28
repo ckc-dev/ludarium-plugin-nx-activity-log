@@ -10,12 +10,15 @@ Usage:
 Flags:
     --warnings  Also fix warnings (default: errors only)
 
+A backup of the original is always saved as <import.json>.bak before any fixes are applied.
+
 Exit code: 0 on success, 1 if user declines any fix, 2 on error.
 """
 
 import sys
 import json
 import os
+import shutil
 from datetime import datetime
 
 from nxal_common import load_json
@@ -250,8 +253,12 @@ def fix_playtime(summary, events):
     if declared == calc:
         return summary, False
 
-    diff_pct = abs(declared - calc) / calc * 100 if calc > 0 else 0
-    print(f"\n  Playtime mismatch: declared={declared}s, calculated={calc}s (diff={diff_pct:.1f}%)")
+    if calc > 0:
+        diff_pct = abs(declared - calc) / calc * 100
+        diff_str = f"(diff={diff_pct:.1f}%)"
+    else:
+        diff_str = f"(declared={declared}s, no focus time in events)"
+    print(f"\n  Playtime mismatch: declared={declared}s, calculated={calc}s {diff_str}")
     print(f"\n  Fix: Update playtime to {calc}s")
 
     confirm = input("\n  Apply fix? [y/N]: ").strip().lower()
@@ -280,6 +287,11 @@ def main():
     except Exception as e:
         print(f"Error loading {import_path}: {e}")
         sys.exit(1)
+
+    backup_path = import_path + ".bak"
+    shutil.copy2(import_path, backup_path)
+    print(f"Backup saved: {backup_path}")
+    print()
 
     print(f"Fixing: {import_path}")
     if FIX_WARNINGS:
@@ -388,11 +400,6 @@ def main():
         print()
 
     if fixes_applied > 0:
-        backup_path = import_path + ".bak"
-        with open(backup_path, "w") as f:
-            json.dump(data, f, indent=4)
-        print(f"Backup saved: {backup_path}")
-
         with open(import_path, "w") as f:
             json.dump(data, f, indent=4)
         print(f"Fixed file saved: {import_path}")

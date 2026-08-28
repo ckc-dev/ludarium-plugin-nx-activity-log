@@ -26,7 +26,6 @@ Exit code: 0 if all checks pass (warnings OK), 1 if any error is found.
 """
 
 import sys
-import time
 from datetime import datetime
 
 from nxal_common import (
