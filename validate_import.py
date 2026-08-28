@@ -26,12 +26,16 @@ Exit code: 0 if all checks pass (warnings OK), 1 if any error is found.
 """
 
 import sys
-from datetime import datetime
 
 from nxal_common import (
-    EVENT_TYPE_MAP,
     VALID_EVENT_TYPES,
     VerificationResult,
+    calculate_playtime,
+    find_duplicate_events,
+    find_first_last_launch,
+    find_orphaned_lost_focus,
+    format_timestamp,
+    is_sorted,
     is_valid_hex,
     load_json,
     USER_ID_HEX_LENGTH,
@@ -239,17 +243,11 @@ def validate_events(prefix, events, summary, result):
         return
 
     # Check for duplicate events (PDM logging artifact, not a real error)
-    seen_events = {}
-    for i, ev in enumerate(events):
-        key = (ev["type"], ev["clockTimestamp"])
-        if key in seen_events:
-            result.warn(f"{prefix}: duplicate event at index {i} (same as index {seen_events[key]})")
-        else:
-            seen_events[key] = i
+    for i, first_idx, ev in find_duplicate_events(events):
+        result.warn(f"{prefix}: duplicate event at index {i} (same as index {first_idx})")
 
     # Events sorted by clockTimestamp
-    timestamps = [ev["clockTimestamp"] for ev in events]
-    if timestamps == sorted(timestamps):
+    if is_sorted(events):
         result.ok(f"{prefix}: events sorted by clockTimestamp")
     else:
         result.warn(f"{prefix}: events NOT sorted by clockTimestamp")
@@ -333,53 +331,14 @@ def validate_events(prefix, events, summary, result):
     validate_event_sequences(prefix, events, result)
 
 
-def calculate_playtime(events):
-    """Calculate playtime from focus events.
-
-    Only counts completed focus periods (Gained Focus → Lost Focus).
-    Unclosed sessions are ignored since we can't know when they ended.
-    """
-    playtime = 0
-    last_focus_start = None
-    for ev in events:
-        if ev["type"] == "Gained Focus":
-            last_focus_start = ev["clockTimestamp"]
-        elif ev["type"] == "Lost Focus" and last_focus_start is not None:
-            playtime += ev["clockTimestamp"] - last_focus_start
-            last_focus_start = None
-    return playtime
-
-
-def format_timestamp(ts):
-    """Format Unix timestamp to human-readable datetime."""
-    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
-
-
 def print_user_sessions(user):
     """Print the first and last sessions for a user."""
-    name = user.get("name", "Unknown")
     titles = user.get("titles", [])
 
     if not titles:
         return
 
-    first_session = None
-    last_session = None
-
-    for title in titles:
-        events = title.get("events", [])
-        title_name = title.get("name", "Unknown")
-
-        for ev in events:
-            if ev["type"] == "Launched":
-                ts = ev["clockTimestamp"]
-                session_info = {"game": title_name, "timestamp": ts}
-
-                if first_session is None or ts < first_session["timestamp"]:
-                    first_session = session_info
-
-                if last_session is None or ts > last_session["timestamp"]:
-                    last_session = session_info
+    first_session, last_session = find_first_last_launch(titles)
 
     if first_session:
         print(f"  First session: {format_timestamp(first_session['timestamp'])} - {first_session['game']}")
@@ -390,9 +349,6 @@ def print_user_sessions(user):
 def validate_event_sequences(prefix, events, result):
     launched_count = 0
     closed_count = 0
-    focus_depth = 0
-    orphaned_lost = 0
-    last_type = None
 
     for i, ev in enumerate(events):
         et = ev["type"]
@@ -405,19 +361,12 @@ def validate_event_sequences(prefix, events, result):
                 result.error(
                     f"{prefix}: 'Closed' at event#{i} without preceding 'Launched'"
                 )
-        elif et == "Gained Focus":
-            focus_depth += 1
-        elif et == "Lost Focus":
-            if focus_depth > 0:
-                focus_depth -= 1
-            else:
-                orphaned_lost += 1
 
-        last_type = et
+    orphaned_lost = find_orphaned_lost_focus(events)
 
-    if orphaned_lost > 0:
+    if orphaned_lost:
         result.warn(
-            f"{prefix}: {orphaned_lost} 'Lost Focus' event(s) without preceding 'Gained Focus' (PDM artifact)"
+            f"{prefix}: {len(orphaned_lost)} 'Lost Focus' event(s) without preceding 'Gained Focus' (PDM artifact)"
         )
 
     if launched_count > 0:

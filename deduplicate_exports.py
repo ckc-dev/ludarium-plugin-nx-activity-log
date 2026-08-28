@@ -23,7 +23,7 @@ import os
 import json
 import shutil
 
-from nxal_common import load_json
+from nxal_common import calculate_playtime, count_launches, load_json
 
 
 def extract_sessions(events):
@@ -75,24 +75,6 @@ def extract_sessions(events):
 def session_key(session, title_id, user_id):
     """Unique key for a session: (title_id, user_id, start_timestamp)."""
     return (title_id, user_id, session["start"])
-
-
-def count_launches(events):
-    """Count Launched events."""
-    return sum(1 for ev in events if ev.get("type") == "Launched")
-
-
-def calculate_playtime(events):
-    """Calculate playtime from focus events (using clockTimestamp)."""
-    playtime = 0
-    last_focus_start = None
-    for ev in events:
-        if ev.get("type") == "Gained Focus":
-            last_focus_start = ev.get("clockTimestamp")
-        elif ev.get("type") == "Lost Focus" and last_focus_start is not None:
-            playtime += ev["clockTimestamp"] - last_focus_start
-            last_focus_start = None
-    return playtime
 
 
 def build_session_index(exports):

@@ -19,64 +19,31 @@ import sys
 import json
 import os
 import shutil
-from datetime import datetime
 
-from nxal_common import load_json
+from nxal_common import (
+    calculate_playtime,
+    count_launches,
+    find_duplicate_events,
+    find_first_last_launch,
+    find_orphaned_lost_focus,
+    format_timestamp,
+    is_sorted,
+    load_json,
+)
 
 FIX_WARNINGS = "--warnings" in sys.argv
 
 
-def format_ts(ts):
-    """Format Unix timestamp to human-readable datetime."""
-    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
-
-
-def find_first_last_sessions(titles):
-    """Find first and last Launched events across all titles."""
-    first = None
-    last = None
-
-    for title in titles:
-        for ev in title.get("events", []):
-            if ev["type"] == "Launched":
-                ts = ev["clockTimestamp"]
-                info = {"game": title.get("name", "Unknown"), "timestamp": ts}
-
-                if first is None or ts < first["timestamp"]:
-                    first = info
-                if last is None or ts > last["timestamp"]:
-                    last = info
-
-    return first, last
-
-
-def find_focus_errors(events):
-    """Find Lost Focus events without preceding Gained Focus."""
-    errors = []
-    focus_depth = 0
-
-    for i, ev in enumerate(events):
-        if ev["type"] == "Gained Focus":
-            focus_depth += 1
-        elif ev["type"] == "Lost Focus":
-            if focus_depth > 0:
-                focus_depth -= 1
-            else:
-                errors.append(i)
-
-    return errors
-
-
 def fix_focus_errors(events, title_name):
     """Fix unbalanced focus events by inserting missing Gained Focus."""
-    indices = find_focus_errors(events)
+    indices = find_orphaned_lost_focus(events)
     if not indices:
         return events, False
 
     print(f"\n  Found {len(indices)} 'Lost Focus' event(s) without preceding 'Gained Focus':")
     for idx in indices[:5]:
         ev = events[idx]
-        print(f"    [{idx}] Lost Focus at {format_ts(ev['clockTimestamp'])} ({ev['clockTimestamp']})")
+        print(f"    [{idx}] Lost Focus at {format_timestamp(ev['clockTimestamp'])} ({ev['clockTimestamp']})")
     if len(indices) > 5:
         print(f"    ... and {len(indices) - 5} more")
 
@@ -100,18 +67,12 @@ def fix_focus_errors(events, title_name):
                 "steadyTimestamp": insert_steady,
                 "type": "Gained Focus"
             })
-            print(f"    + Inserted Gained Focus at {format_ts(insert_ts)} ({insert_ts})")
+            print(f"    + Inserted Gained Focus at {format_timestamp(insert_ts)} ({insert_ts})")
 
         fixed_events.append(ev)
         last_focus_type = ev["type"]
 
     return fixed_events, True
-
-
-def find_out_of_order(events):
-    """Find events not sorted by clockTimestamp."""
-    timestamps = [ev["clockTimestamp"] for ev in events]
-    return timestamps != sorted(timestamps)
 
 
 def fix_out_of_order(events):
@@ -128,21 +89,6 @@ def fix_out_of_order(events):
     return events, True
 
 
-def find_duplicate_events(events):
-    """Find duplicate events (same type and clockTimestamp)."""
-    seen = {}
-    duplicates = []
-
-    for i, ev in enumerate(events):
-        key = (ev["type"], ev["clockTimestamp"])
-        if key in seen:
-            duplicates.append((i, ev))
-        else:
-            seen[key] = i
-
-    return duplicates
-
-
 def fix_duplicate_events(events):
     """Remove duplicate events."""
     duplicates = find_duplicate_events(events)
@@ -150,8 +96,8 @@ def fix_duplicate_events(events):
         return events, False
 
     print(f"\n  Found {len(duplicates)} duplicate event(s):")
-    for idx, ev in duplicates[:5]:
-        print(f"    [{idx}] {ev['type']} at {format_ts(ev['clockTimestamp'])} ({ev['clockTimestamp']})")
+    for idx, _, ev in duplicates[:5]:
+        print(f"    [{idx}] {ev['type']} at {format_timestamp(ev['clockTimestamp'])} ({ev['clockTimestamp']})")
     if len(duplicates) > 5:
         print(f"    ... and {len(duplicates) - 5} more")
 
@@ -220,7 +166,7 @@ def fix_null_fields(events):
 def fix_launches(summary, events):
     """Recalculate launches count."""
     declared = summary.get("launches", 0)
-    actual = sum(1 for ev in events if ev["type"] == "Launched")
+    actual = count_launches(events)
 
     if declared == actual:
         return summary, False
@@ -241,14 +187,7 @@ def fix_playtime(summary, events):
     """Recalculate playtime."""
     declared = summary.get("playtime", 0)
 
-    calc = 0
-    last_start = None
-    for ev in events:
-        if ev["type"] == "Gained Focus":
-            last_start = ev["clockTimestamp"]
-        elif ev["type"] == "Lost Focus" and last_start is not None:
-            calc += ev["clockTimestamp"] - last_start
-            last_start = None
+    calc = calculate_playtime(events)
 
     if declared == calc:
         return summary, False
@@ -312,11 +251,11 @@ def main():
 
         print(f"== User '{name}' ==")
 
-        first, last = find_first_last_sessions(titles)
+        first, last = find_first_last_launch(titles)
         if first:
-            print(f"  First session: {format_ts(first['timestamp'])} - {first['game']}")
+            print(f"  First session: {format_timestamp(first['timestamp'])} - {first['game']}")
         if last:
-            print(f"  Last session:  {format_ts(last['timestamp'])} - {last['game']}")
+            print(f"  Last session:  {format_timestamp(last['timestamp'])} - {last['game']}")
         print()
 
         for title in titles:
@@ -338,7 +277,7 @@ def main():
                 changed = False
 
                 if FIX_WARNINGS:
-                    focus_indices = find_focus_errors(events)
+                    focus_indices = find_orphaned_lost_focus(events)
                     if focus_indices:
                         events, fixed = fix_focus_errors(events, title_name)
                         if fixed:
@@ -347,7 +286,7 @@ def main():
                             changed = True
                             continue
 
-                if FIX_WARNINGS and find_out_of_order(events):
+                if FIX_WARNINGS and not is_sorted(events):
                     events, fixed = fix_out_of_order(events)
                     if fixed:
                         title_fixes += 1
@@ -355,14 +294,15 @@ def main():
                         changed = True
                         continue
 
-                duplicates = find_duplicate_events(events)
-                if duplicates:
-                    events, fixed = fix_duplicate_events(events)
-                    if fixed:
-                        title_fixes += 1
-                        fixes_applied += 1
-                        changed = True
-                        continue
+                if FIX_WARNINGS:
+                    duplicates = find_duplicate_events(events)
+                    if duplicates:
+                        events, fixed = fix_duplicate_events(events)
+                        if fixed:
+                            title_fixes += 1
+                            fixes_applied += 1
+                            changed = True
+                            continue
 
                 nulls = find_null_fields(events)
                 if nulls:
@@ -391,10 +331,7 @@ def main():
             title["events"] = events
             title["summary"] = summary
 
-            if title_fixes == 0 and not any([
-                find_duplicate_events(events),
-                find_null_fields(events),
-            ]):
+            if title_fixes == 0 and not find_null_fields(events):
                 print(f"    No errors found")
 
         print()

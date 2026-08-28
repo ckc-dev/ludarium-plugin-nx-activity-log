@@ -16,7 +16,7 @@ import sys
 import json
 import os
 
-from nxal_common import load_json
+from nxal_common import calculate_playtime, count_launches, load_json
 
 
 def merge_users(source_users, target_users):
@@ -112,22 +112,6 @@ def merge_summary(target, source, events):
         "launches": launches,
         "playtime": playtime,
     }
-
-
-def count_launches(events):
-    return sum(1 for ev in events if ev.get("type") == "Launched")
-
-
-def calculate_playtime(events):
-    playtime = 0
-    last_focus_start = None
-    for ev in events:
-        if ev.get("type") == "Gained Focus":
-            last_focus_start = ev.get("clockTimestamp")
-        elif ev.get("type") == "Lost Focus" and last_focus_start is not None:
-            playtime += ev["clockTimestamp"] - last_focus_start
-            last_focus_start = None
-    return playtime
 
 
 def merge_metadata(inputs):
