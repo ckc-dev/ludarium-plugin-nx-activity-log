@@ -44,6 +44,11 @@ Exit codes: `0` = pass (warnings OK), `1` = errors found, `2` = usage/loading er
   is absent; fall back to the source summary only when the events list is empty.
 - **`launches`**: Count of sessions (Launched events), not raw event count
 - **`playtime`**: Sum of `Gained Focus` → `Lost Focus` durations (uses steadyTimestamp for accuracy)
+- **Key normalization**: `merge_exports` and `deduplicate_exports` write output through
+  `normalize_export` (in `nxal_common.py`), which fixes a canonical key order for every object
+  (top/user/title/summary/event). This makes merging directly vs. after dedup produce
+  byte-identical files despite the source exports and pass-through titles having differing key
+  orders.
 
 ## Important: Import Behavior
 
