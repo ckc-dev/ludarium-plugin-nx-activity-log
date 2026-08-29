@@ -52,6 +52,19 @@ Exit codes: `0` = pass (warnings OK), `1` = errors found, `2` = usage/loading er
   (e.g. curly apostrophes, `™`/`®`) literal instead of `\u`-escaped. Imports also round-trip
   like an NXAL export. Note: rare imported titles (e.g. one ASTRAL CHAIN summary order) are
   written non-sorted by NXAL and get normalized to canonical order.
+- **Dedup user matching**: `deduplicate_exports` matches users by display **name** by default
+  (`--match-by name`, matching `merge_exports`). Use `--match-by id` for strict per-account
+  matching. This matters because a user's ID can change between exports (user/console
+  migration, e.g. `100000…` → `10012F…`); matching by ID would keep shared history in the
+  newer export instead of moving it to the oldest. `--rename OLD=NEW` (repeatable) folds a
+  renamed user into one identity for matching (ignored, with a warning, under `--match-by id`).
+  Renames/identity maps affect cross-file matching only; stored names/IDs are never rewritten.
+- **Merge title normalization**: `merge_exports` dedups + sorts every title's events whether
+  the title comes from one input or many (`normalize_title_events`/`normalize_user_titles`).
+  A title present in only one input used to be stored as-is (keeping PDM-artifact duplicate
+  `Account Logout` events), while a two-input title was deduplicated by `merge_title`; that
+  asymmetry made `merge(deduplicate(x)) != merge(x)` once name-based dedup moved shared
+  titles into a single file. All titles are now normalized so the convergence holds.
 
 ## Important: Import Behavior
 
