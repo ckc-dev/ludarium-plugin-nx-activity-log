@@ -37,16 +37,31 @@ MERGE_DEDUP_KEY = ("type", "clockTimestamp", "steadyTimestamp")
 
 def merge_users(source_users, target_users):
     """Merge source users into target users by display name."""
-    merged = {u["name"]: u for u in target_users}
-
-    for user in source_users:
+    merged = {}
+    for user in list(target_users) + list(source_users):
         name = user["name"]
         if name in merged:
             merged[name] = merge_single_user(merged[name], user)
         else:
-            merged[name] = user
-
+            merged[name] = normalize_user_titles(user)
     return list(merged.values())
+
+
+def normalize_user_titles(user):
+    """Return `user` with every title's events deduplicated and sorted.
+
+    Used so that every user entering the merged result — including the
+    first file's users, which are otherwise stored as-is — has normalized
+    events. Without this, a title present in only one input keeps its raw
+    events (including PDM-artifact duplicate 'Account Logout' events) while
+    a title present in two inputs is deduplicated by merge_title, making
+    merge(dedup(x)) differ from merge(x) depending on where a title lands.
+    """
+    return {
+        "id": user.get("id"),
+        "name": user.get("name"),
+        "titles": [normalize_title_events(t) for t in user.get("titles", [])],
+    }
 
 
 def merge_single_user(target, source):
@@ -58,13 +73,38 @@ def merge_single_user(target, source):
         if tid in merged_titles:
             merged_titles[tid] = merge_title(merged_titles[tid], title)
         else:
-            merged_titles[tid] = title
+            merged_titles[tid] = normalize_title_events(title)
 
     return {
         "id": target["id"],
         "name": target["name"],
         "titles": list(merged_titles.values()),
     }
+
+
+def normalize_title_events(title):
+    """Return `title` with its events deduplicated and sorted in place.
+
+    A title that appears in only one input is passed through merge_title
+    untouched, so its raw events (which may contain PDM-artifact duplicate
+    'Account Logout' events with identical 3-field keys) are preserved. A
+    title that appears in two inputs is deduplicated by merge_title. That
+    asymmetry made merge(dedup(x)) differ from merge(x): name-based dedup
+    moves a shared title into a single file, so it flips from the merged
+    path to the pass-through path. Normalizing events here (dedup + sort)
+    keeps every output title consistent regardless of source-count, while
+    leaving the stored summary untouched.
+    """
+    events = title.get("events", [])
+    if not events:
+        return title
+    normalized = {
+        "id": title["id"],
+        "name": title["name"],
+        "summary": title["summary"],
+        "events": sort_events(deduplicate_events(events, MERGE_DEDUP_KEY)),
+    }
+    return normalized
 
 
 def merge_title(target, source):
