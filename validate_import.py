@@ -346,6 +346,41 @@ def print_user_sessions(user):
         print(f"  Last session:  {format_timestamp(last_session['timestamp'])} - {last_session['game']}")
 
 
+def print_overall_sessions(data):
+    """Print the overall first and last session across all users.
+
+    Complements the per-user printouts in validate_users with a global
+    view: the earliest and latest 'Launched' event anywhere in the export,
+    including which user/account owned it.
+    """
+    first = None
+    last = None
+
+    for user in data.get("users", []):
+        user_name = user.get("name", "Unknown")
+        for title in user.get("titles", []):
+            for ev in title.get("events", []):
+                if ev.get("type") != "Launched":
+                    continue
+                ts = ev["clockTimestamp"]
+                info = {
+                    "timestamp": ts,
+                    "game": title.get("name", "Unknown"),
+                    "user": user_name,
+                }
+                if first is None or ts < first["timestamp"]:
+                    first = info
+                if last is None or ts > last["timestamp"]:
+                    last = info
+
+    print("\n== Overall Sessions ==")
+    if first is None:
+        print("  No sessions found")
+        return
+    print(f"  First session: {format_timestamp(first['timestamp'])} - {first['game']} ({first['user']})")
+    print(f"  Last session:  {format_timestamp(last['timestamp'])} - {last['game']} ({last['user']})")
+
+
 def validate_event_sequences(prefix, events, result):
     launched_count = 0
     closed_count = 0
@@ -395,6 +430,8 @@ def main():
 
     validate_metadata(data, result)
     validate_users(data, result)
+
+    print_overall_sessions(data)
 
     print("\n" + "=" * 60)
     result.summary()
