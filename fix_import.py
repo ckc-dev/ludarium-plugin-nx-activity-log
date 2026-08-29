@@ -16,7 +16,6 @@ Exit code: 0 on success, 1 if user declines any fix, 2 on error.
 """
 
 import sys
-import json
 import os
 import shutil
 
@@ -30,6 +29,7 @@ from nxal_common import (
     format_timestamp,
     is_sorted,
     load_json,
+    write_export_json,
 )
 
 FIX_WARNINGS = "--warnings" in sys.argv
@@ -355,8 +355,7 @@ def main():
         print()
 
     if fixes_applied > 0:
-        with open(import_path, "w") as f:
-            json.dump(data, f, indent=4)
+        write_export_json(import_path, data)
         print(f"Fixed file saved: {import_path}")
         print(f"\nApplied {fixes_applied} fix(es)")
     else:

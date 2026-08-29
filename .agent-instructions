@@ -44,13 +44,14 @@ Exit codes: `0` = pass (warnings OK), `1` = errors found, `2` = usage/loading er
   is absent; fall back to the source summary only when the events list is empty.
 - **`launches`**: Count of sessions (Launched events), not raw event count
 - **`playtime`**: Sum of `Gained Focus` → `Lost Focus` durations (uses steadyTimestamp for accuracy)
-- **Serialization**: `merge_exports` and `deduplicate_exports` write output through
+- **Serialization**: `merge_exports`, `deduplicate_exports`, and `fix_import` write output through
   `write_export_json` (in `nxal_common.py`), which deep-sorts dict keys alphabetically
   (`normalize_export`) to match NXAL's nlohmann `std::map` output, keeps UTF-8 literal
   (`ensure_ascii=False`), and appends a trailing newline (`<< std::endl`). This makes
-  merging directly vs. after dedup produce byte-identical files that also round-trip like an
-  NXAL export. Note: rare imported titles (e.g. one ASTRAL CHAIN summary order) are written
-  non-sorted by NXAL and get normalized to canonical order.
+  merging directly vs. after dedup produce byte-identical files and keeps non-ASCII names
+  (e.g. curly apostrophes, `™`/`®`) literal instead of `\u`-escaped. Imports also round-trip
+  like an NXAL export. Note: rare imported titles (e.g. one ASTRAL CHAIN summary order) are
+  written non-sorted by NXAL and get normalized to canonical order.
 
 ## Important: Import Behavior
 
