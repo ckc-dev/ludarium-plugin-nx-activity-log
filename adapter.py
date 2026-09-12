@@ -142,7 +142,7 @@ class NXALGameTrackerAdapter:
     # ------------------------------------------------------------------
     def fetch_dashboard_data(self):
         data = self._load()
-        games_list = self._game_entries(data(migrations))
+        games_list = self._game_entries(data)
         sessions, total = [], 0
         for user_name, t in self._titles(data):
             for group in _title_session_pairs([t]):
@@ -155,6 +155,8 @@ class NXALGameTrackerAdapter:
                     "name": t.get("name", "Unknown"),
                     "user": user_name,
                     "date_time": format_timestamp(start_ts),
+                    "start_dt": start_ts,
+                    "end_dt": start_ts + duration,
                     "duration": duration,
                 })
                 total += duration
