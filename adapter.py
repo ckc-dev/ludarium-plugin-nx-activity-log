@@ -143,24 +143,62 @@ class NXALGameTrackerAdapter:
     def fetch_dashboard_data(self):
         data = self._load()
         games_list = self._game_entries(data)
+        stored_by_game = {g["game_id"]: g.get("stored_duration", 0) for g in games_list}
         sessions, total = [], 0
         for user_name, t in self._titles(data):
+            game_id = "nx_" + str(t["id"])
+            cleared = False
             for group in _title_session_pairs([t]):
                 duration = calculate_playtime(group)
                 if duration < MIN_SESSION_DURATION:
                     continue
                 start_ts = group[0]["clockTimestamp"]
+                cleared = True
                 sessions.append({
-                    "game_id": "nx_" + str(t["id"]),
+                    "game_id": game_id,
                     "name": t.get("name", "Unknown"),
                     "user": user_name,
                     "date_time": format_timestamp(start_ts),
-                    "start_dt": start_ts,
-                    "end_dt": start_ts + duration,
+                    "start_dt": datetime.fromtimestamp(start_ts),
+                    "end_dt": datetime.fromtimestamp(start_ts + duration),
                     "duration": duration,
                 })
                 total += duration
+            if not cleared:
+                stored = stored_by_game.get(game_id, 0)
+                first_ts = t.get("summary", {}).get("firstPlayed", 0) or 0
+                if stored > 0:
+                    sessions.append({
+                        "game_id": game_id,
+                        "name": t.get("name", "Unknown"),
+                        "user": user_name,
+                        "date_time": format_timestamp(first_ts),
+                        "start_dt": datetime.fromtimestamp(first_ts),
+                        "end_dt": datetime.fromtimestamp(first_ts + stored),
+                        "duration": stored,
+                    })
+                    total += stored
         # sort chronologically
+        # %s
+        # Titles whose event groups never clear MIN_SESSION_DURATION still own
+        # stored playtime (export summary) - surface them as a single summary
+        # session attributed to default_user_id so they are not silently hidden.
+        seen_game = {s["game_id"] for s in sessions}
+        for g in games_list:
+            stored = g.get("stored_duration", 0)
+            if g["game_id"] in seen_game or stored <= 0:
+                continue
+            first_ts = g.get("last_session") or 0
+            sessions.append({
+                "game_id": g["game_id"],
+                "name": g.get("name", "Unknown"),
+                "user": self.default_user_id,
+                "date_time": format_timestamp(first_ts),
+                "start_dt": datetime.fromtimestamp(first_ts),
+                "end_dt": datetime.fromtimestamp(first_ts + stored),
+                "duration": stored,
+            })
+            total += stored
         sessions.sort(key=lambda s: s["date_time"])
         return games_list, sessions, total
 
