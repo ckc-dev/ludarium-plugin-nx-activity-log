@@ -118,7 +118,10 @@ class NXALGameTrackerAdapter:
         out = []
         for user_name, t in self._titles(data):
             game_id = "nx_" + str(t["id"])
-            if any(g["game_id"] == game_id for g in out):
+            existing = next((g for g in out if g["game_id"] == game_id), None)
+            if existing:
+                existing["stored_duration"] = existing.get("stored_duration", 0) \
+                    + t.get("summary", {}).get("playtime", 0)
                 continue
             first, last = first_last_from_events(
                 t.get("events", []),
@@ -150,8 +153,6 @@ class NXALGameTrackerAdapter:
             cleared = False
             for group in _title_session_pairs([t]):
                 duration = calculate_playtime(group)
-                if duration < MIN_SESSION_DURATION:
-                    continue
                 start_ts = group[0]["clockTimestamp"]
                 cleared = True
                 sessions.append({
@@ -165,13 +166,13 @@ class NXALGameTrackerAdapter:
                 })
                 total += duration
             if not cleared:
-                stored = stored_by_game.get(game_id, 0)
+                stored = g.get("stored_duration", 0)
                 first_ts = t.get("summary", {}).get("firstPlayed", 0) or 0
                 if stored > 0:
                     sessions.append({
                         "game_id": game_id,
                         "name": t.get("name", "Unknown"),
-                        "user": user_name,
+                        "user": self.default_user_id,
                         "date_time": format_timestamp(first_ts),
                         "start_dt": datetime.fromtimestamp(first_ts),
                         "end_dt": datetime.fromtimestamp(first_ts + stored),
