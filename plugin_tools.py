@@ -1,54 +1,51 @@
-"""GameTime: PLUGIN_TOOLS for the NXAL adapter.
-
-Reuses only verified nxal_common helpers (load_json, count_launches,
-calculate_playtime, find_duplicate_events, event_key, deduplicate_events,
-sort_events, normalize_export, write_export_json) plus duplicate-event
-primitives so tool output stays byte-compatible with the hosted CLI.
-"""
-
 import os
 
-from nxal_common import (load_json, count_launches, calculate_playtime,
-                         find_duplicate_events, event_key,
-                         deduplicate_events, sort_events, normalize_export,
-                         write_export_json)
+from nxal_common import (load_json, write_export_json, count_launches,
+                         calculate_playtime, find_duplicate_events,
+                         deduplicate_events, sort_events)
+
+
+def _path(params, ctx):
+    path = (params.get("path") or "").strip()
+    if path and os.path.isfile(path):
+        return path, None
+    hint = ctx.get_setting("import_path_hint", "").strip()
+    if hint and os.path.isfile(hint):
+        return hint, None
+    return None, f"Provide a path to an NXAL import.json (or set import_path_hint)."
 
 
 def verify_export(params, ctx):
-    path = (params.get("path") or "").strip()
-    if not os.path.isfile(path):
-        return {"ok": False, "message": f"File not found: {path}",
-                "lines": []}
+    path, err = _path(params, ctx)
+    if err:
+        return {"ok": False, "message": err, "lines": []}
     try:
         data = load_json(path)
     except Exception as e:
-        return {"ok": False, "message": f"Could not read: {e}", "lines": []}
-
+        return {"ok": False, "message": f"Could not read file: {e}", "lines": []}
     users = data.get("users", [])
     titles = sum(len(u.get("titles", [])) for u in users)
     launches = sum(count_launches(t.get("events", []))
                    for u in users for t in u.get("titles", []))
-    minutes = sum(calculate_playtime(t.get("events", [])) for u in users
-                  for t in u.get("titles", [])) / 60.0
+    minutes = sum(calculate_playtime(t.get("events", []))
+                  for u in users for t in u.get("titles", [])) / 60.0
     dupes = sum(len(find_duplicate_events(t.get("events", [])))
                 for u in users for t in u.get("titles", []))
-    lines = [f"Users: {len(users)}", f"Titles: {titles}",
+    lines = [f"File: {path}", f"Users: {len(users)}", f"Titles: {titles}",
              f"Launches: {launches}", f"Playtime: {minutes:.1f} min"]
     if dupes:
-        lines.append(f"WARNING: {dupes} duplicate-event group(s) found")
-    return {"ok": True, "message": "Export looks valid", "lines": lines}
+        lines.append(f"WARN: {dupes} duplicate event group(s) present")
+    return {"ok": True, "message": "Export verified", "lines": lines}
 
 
 def fix_import(params, ctx):
-    path = (params.get("path") or "").strip()
-    if not os.path.isfile(path):
-        return {"ok": False, "message": f"File not found: {path}",
-                "lines": []}
+    path, err = _path(params, ctx)
+    if err:
+        return {"ok": False, "message": err, "lines": []}
     try:
         data = load_json(path)
     except Exception as e:
-        return {"ok": False, "message": f"Could not read: {e}", "lines": []}
-
+        return {"ok": False, "message": f"Could not read file: {e}", "lines": []}
     fixed = 0
     for u in data.get("users", []):
         for t in u.get("titles", []):
@@ -58,35 +55,26 @@ def fix_import(params, ctx):
             evs = sort_events(evs)
             fixed += before - len(evs)
             t["events"] = evs
-    data = normalize_export(data)
     write_export_json(path, data)
-    return {"ok": True, "message": f"Fixed {fixed} duplicate-ish event(s)",
-            "lines": [f"Rewrote: {path}"]}
+    return {"ok": True, "message": f"Rewrote {path} (removed {fixed} dup events)",
+            "lines": []}
 
 
 PLUGIN_TOOLS = [
-    {
-        "key": "verify_export",
-        "name": "Verify export",
-        "title": "Verify export",
-        "description": "Verify users/titles/launches/playtime in an export.",
-        "fields": [
-            {"name": "path", "label": "Export path", "type": "path",
-             "required": True,
-             "help": "Absolute path to an NXAL import.json export."},
-        ],
-        "execute": verify_export,
-    },
-    {
-        "key": "fix_import",
-        "name": "Fix import",
-        "title": "Fix import",
-        "description": "Deduplicate + sort events and rewrite the export in place.",
-        "fields": [
-            {"name": "path", "label": "Export path", "type": "path",
-             "required": True,
-             "help": "Absolute path to an NXAL import.json export."},
-        ],
-        "execute": fix_import,
-    },
+    {"key": "verify_export", "name": "Verify export",
+     "description": "Validate users/titles/launches/playtime in an NXAL export.",
+     "fields": [
+         {"name": "path", "label": "Export path", "type": "path",
+          "required": False,
+          "help": "Leave empty to reuse the environment import_path_hint."},
+     ],
+     "execute": verify_export},
+    {"key": "fix_import", "name": "Fix export",
+     "description": "Deduplicate + sort events, write back byte-compatibly.",
+     "fields": [
+         {"name": "path", "label": "Export path", "type": "path",
+          "required": False,
+          "help": "Leave empty to reuse the environment import_path_hint."},
+     ],
+     "execute": fix_import},
 ]
