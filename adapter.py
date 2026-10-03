@@ -284,6 +284,153 @@ class NXALGameTrackerAdapter:
             self._recompute_title(data, t)
         self._save(data)
 
+    # --- Optional capability: session PARTS (per-event detail surface) ---
+    # NXAL CAN decompose a reconstructed session into its constituent real
+    # events. Each event inside the group's Launched..Closed span is a part,
+    # keyed by its own clockTimestamp. Breaks/pauses are NOT entities: they
+    # are the derived gap between a Lost Focus and the next Gained Focus, so
+    # they are returned above as read-only gap rows (the adapter never stores
+    # or edits a pause directly).
+    supports_session_parts = True
+
+    # NOTE: actual-vs-stored honesty for NXAL needs NO adapter persisted part
+    # rows: a session "part" here simply IS the existing real event inside the
+    # group's Launched..Closed span, keyed by its own clockTimestamp. The host
+    # surfaces a part only after calling supports_session_parts (capability
+    # flag), and every part edit re-writes that one event via _recompute_title
+    # + _save — the SAME trio add/update/delete_session already end with, so
+    # stored_duration and actual_duration both recompute from the same edited
+    # event stream. No phantom, no drift: "pause" is only the derived gap.
+
+    def get_session_parts(self, game_id, original_date_time):
+        data = self._load()
+        target = _parse_dt(original_date_time)
+        parts = []
+        hex_id = str(game_id)
+        if hex_id.startswith("nx_"):
+            hex_id = hex_id[len("nx_"):]
+        for user_name, t in self._titles(data):
+            if str(t.get("id", "")).lower() != hex_id.lower():
+                continue
+            events = t.get("events", [])
+            # find the group starting at target
+            group_start = None
+            for i, ev in enumerate(events):
+                if ev.get("type") == "Launched" and ev["clockTimestamp"] == target:
+                    group_start = i
+                    break
+            if group_start is None:
+                continue
+            end_i = group_start + 1
+            while end_i < len(events) and events[end_i].get("type") != "Closed":
+                end_i += 1
+            if end_i >= len(events):
+                continue
+            span_events = events[group_start:end_i + 1]
+
+            # emit one part per real event + derived read-only gaps.
+            # Real exports store clockTimestamp as epoch ints; keep prev in int
+            # space so format_timestamp gets ints and gaps are plain seconds.
+            # Each event's duration = seconds until the next event of the SAME
+            # type in this span (the plan's "event->next same-type span"); the
+            # last occurrence of a type has no successor -> None.
+            span_timestamps = [ev.get("clockTimestamp") for ev in span_events]
+            prev_ts = None
+            for i, ev in enumerate(span_events):
+                ts = ev.get("clockTimestamp")
+                gap_before = 0
+                if prev_ts is not None and ts is not None:
+                    gap_before = ts - prev_ts
+                ev_type = ev.get("type")
+                next_same = next(
+                    (span_timestamps[j] for j in range(i + 1, len(span_events))
+                     if span_events[j].get("type") == ev_type),
+                    None)
+                duration = (next_same - ts) if (next_same is not None and ts is not None) else None
+                if prev_ts is not None and ev.get("type") == "Gained Focus":
+                    parts.append({
+                        "part_id": None,
+                        "name": "Break",
+                        "start_time": format_timestamp(prev_ts),
+                        "duration": gap_before,
+                        "editable": False,
+                    })
+                parts.append({
+                    "part_id": format_timestamp(ts) if ts is not None else None,
+                    "name": ev.get("type"),
+                    "type": ev.get("type"),
+                    "start_time": format_timestamp(ts) if ts is not None else None,
+                    "duration": duration,
+                    "clockTimestamp": ts,
+                    # Launched/Closed are the group boundaries: they anchor the
+                    # span and must never drift, so they render read-only.
+                    "editable": ev.get("type") not in ("Launched", "Closed"),
+                    "break_before_seconds": gap_before,
+                })
+                if ts is not None:
+                    prev_ts = ts
+            # Only the FIRST title copy matching id takes part in the UI's
+            # session chain. Duplicate copies (same id, same events, owned by
+            # multiple users) must not be concatenated; edits on the parts pane
+            # hit this first copy and make the copies diverge thereafter.
+            return parts
+        return parts
+
+    def update_session_part(self, part_id, duration, new_start, old_start):
+        target_ts = _parse_dt(part_id)
+        new_ts = _parse_dt(new_start)
+        data = self._load()
+        for user_name, t in self._titles(data):
+            events = t.get("events", [])
+            for ev in events:
+                if ev.get("clockTimestamp") == target_ts:
+                    # re-point this one event; guard: Launched/Closed are the
+                    # group boundaries — both stay put (never drift the group).
+                    if ev.get("type") in ("Launched", "Closed"):
+                        continue
+                    ev["clockTimestamp"] = new_ts
+                    events.sort(key=lambda e: e["clockTimestamp"])
+                    self._recompute_title(data, t)
+                    self._save(data)
+                    return
+        self._save(data)
+
+    def add_session_part(self, game_id, start_time, duration):
+        data = self._load()
+        hex_id = str(game_id)
+        if hex_id.startswith("nx_"):
+            hex_id = hex_id[len("nx_"):]
+        for user_name, t in self._titles(data):
+            if str(t.get("id", "")).lower() != hex_id.lower():
+                continue
+            events = t.get("events", [])
+            base = _parse_dt(start_time)
+            # insert a synthetic Gained/Lost Focus pair at start_time -> this
+            # SPLITS the current focus pair in two, inserting a pause between.
+            events.append({"type": "Gained Focus", "clockTimestamp": base})
+            events.append({"type": "Lost Focus", "clockTimestamp": base + int(duration)})
+            events.sort(key=lambda e: e["clockTimestamp"])
+            self._recompute_title(data, t)
+            self._save(data)
+            return
+        self._save(data)
+
+    def delete_session_part(self, part_id):
+        ts = _parse_dt(part_id)
+        data = self._load()
+        for user_name, t in self._titles(data):
+            events = t.get("events", [])
+            for i, ev in enumerate(events):
+                if ev.get("clockTimestamp") == ts:
+                    # guard: Launched/Closed are the group boundaries — both stay
+                    if ev.get("type") in ("Launched", "Closed"):
+                        continue
+                    del events[i]
+                    self._recompute_title(data, t)
+                    self._save(data)
+                    return
+        self._save(data)
+
     def recalculate_totals(self):
         data = self._load()
         for user_name, t in self._titles(data):
