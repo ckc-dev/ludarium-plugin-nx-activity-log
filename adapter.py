@@ -287,10 +287,9 @@ class NXALGameTrackerAdapter:
     # --- Optional capability: session PARTS (per-event detail surface) ---
     # NXAL CAN decompose a reconstructed session into its constituent real
     # events. Each event inside the group's Launched..Closed span is a part,
-    # keyed by its own clockTimestamp. Breaks/pauses are NOT entities: they
-    # are the derived gap between a Lost Focus and the next Gained Focus, so
-    # they are returned above as read-only gap rows (the adapter never stores
-    # or edits a pause directly).
+    # keyed by its own clockTimestamp. Breaks/pauses are NOT entities: a Lost
+    # Focus part's `duration` IS the pause until the next Gained Focus (the
+    # adapter never stores or edits a pause directly).
     supports_session_parts = True
 
     # NOTE: actual-vs-stored honesty for NXAL needs NO adapter persisted part
@@ -300,7 +299,8 @@ class NXALGameTrackerAdapter:
     # flag), and every part edit re-writes that one event via _recompute_title
     # + _save — the SAME trio add/update/delete_session already end with, so
     # stored_duration and actual_duration both recompute from the same edited
-    # event stream. No phantom, no drift: "pause" is only the derived gap.
+    # event stream. No phantom, no drift: a pause is never an entity — it is
+    # the duration a Lost Focus part owns until the next Gained Focus.
 
     def get_session_parts(self, game_id, original_date_time):
         data = self._load()
@@ -328,12 +328,15 @@ class NXALGameTrackerAdapter:
                 continue
             span_events = events[group_start:end_i + 1]
 
-            # emit one part per real event + derived read-only gaps.
+            # emit one part per real event.
             # Real exports store clockTimestamp as epoch ints; keep prev in int
             # space so format_timestamp gets ints and gaps are plain seconds.
-            # Each event's duration = seconds until the next event of the SAME
-            # type in this span (the plan's "event->next same-type span"); the
-            # last occurrence of a type has no successor -> None.
+            # Each event's duration = seconds until the NEXT event of ANY type
+            # in this span (the plan's "event->next event span"), so the part
+            # durations tile the Launched..Closed span exactly; the last event
+            # (Closed) has no successor -> None. Breaks have no rows of their
+            # own: a Lost Focus part's duration IS the pause until the next
+            # Gained Focus.
             span_timestamps = [ev.get("clockTimestamp") for ev in span_events]
             prev_ts = None
             for i, ev in enumerate(span_events):
@@ -341,20 +344,9 @@ class NXALGameTrackerAdapter:
                 gap_before = 0
                 if prev_ts is not None and ts is not None:
                     gap_before = ts - prev_ts
-                ev_type = ev.get("type")
-                next_same = next(
-                    (span_timestamps[j] for j in range(i + 1, len(span_events))
-                     if span_events[j].get("type") == ev_type),
-                    None)
-                duration = (next_same - ts) if (next_same is not None and ts is not None) else None
-                if prev_ts is not None and ev.get("type") == "Gained Focus":
-                    parts.append({
-                        "part_id": None,
-                        "name": "Break",
-                        "start_time": format_timestamp(prev_ts),
-                        "duration": gap_before,
-                        "editable": False,
-                    })
+                next_ts = (span_timestamps[i + 1]
+                           if i + 1 < len(span_timestamps) else None)
+                duration = (next_ts - ts) if (next_ts is not None and ts is not None) else None
                 parts.append({
                     "part_id": format_timestamp(ts) if ts is not None else None,
                     "name": ev.get("type"),
