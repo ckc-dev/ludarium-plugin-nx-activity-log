@@ -244,6 +244,30 @@ class NXALGameTrackerAdapter:
         return [{"game_id": g["game_id"], "name": g["name"]}
                 for g in self._game_entries(self._load())]
 
+    # --- Optional capability: launch counts ---
+    # NXAL is the only source that knows how OFTEN a game was opened: its
+    # export carries summary.launches per title, and the host's session list
+    # cannot derive it because two Launched events inside one
+    # MIN_SESSION_DURATION span reconstruct into a SINGLE session. Steam has
+    # no launch column at all, so this stays an opt-in capability flag.
+    supports_game_stats = True
+
+    def get_game_stats(self):
+        out = {}
+        for _, t in self._titles(self._load()):
+            launches = t.get("summary", {}).get("launches")
+            if not launches:
+                # summary is only refreshed by recalculate_totals; count from
+                # the live event stream so a fresh export still reports them.
+                launches = count_launches(t.get("events", []))
+            if not launches:
+                continue
+            # The same title for two users is one canonical game: add up.
+            game_id = "nx_" + str(t["id"])
+            out.setdefault(game_id, {"launches": 0})
+            out[game_id]["launches"] += int(launches)
+        return out
+
     def add_game(self, game_id, name):
         data = self._load()
         if self._find_title(data, game_id) is None:
