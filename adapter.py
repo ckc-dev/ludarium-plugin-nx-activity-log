@@ -79,6 +79,8 @@ class NXALGameTrackerAdapter:
         self.type = "nx_activity_log"
         self._messages = []
         self.config = config or {}
+        self._cache = None
+        self._cache_stamp = None
 
     # ---------- host integration ----------
     def report(self, message):
@@ -92,11 +94,45 @@ class NXALGameTrackerAdapter:
         return msgs
 
     # ---------- storage ----------
+    #
+    # The export is a ~1MB JSON document and the host calls _load() once per
+    # session while rendering a dashboard, so an uncached read re-parses the
+    # whole file hundreds of times per page (~3s at 400+ sessions). We cache
+    # the parsed document keyed on (mtime, size) so repeated reads inside one
+    # request are free, while any external write still invalidates the cache.
     def _load(self):
-        return load_json(self.path)
+        try:
+            stat = os.stat(self.path)
+            stamp = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            stamp = None
+
+        if stamp is not None and self._cache is not None and self._cache_stamp == stamp:
+            return self._cache
+
+        data = load_json(self.path)
+        self._cache = data
+        try:
+            stat = os.stat(self.path)
+            self._cache_stamp = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            self._cache_stamp = None
+        return data
 
     def _save(self, data):
         write_export_json(self.path, data)
+        # Keep the cache: `data` is the object we just serialized, and the
+        # refreshed stamp below prevents a stale read of our own write.
+        self._cache = data
+        try:
+            stat = os.stat(self.path)
+            self._cache_stamp = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            self._cache_stamp = None
+
+    def _invalidate_cache(self):
+        self._cache = None
+        self._cache_stamp = None
 
     def _titles(self, data):
         for u in data.get("users", []):
@@ -211,7 +247,7 @@ class NXALGameTrackerAdapter:
         data = self._load()
         if self._find_title(data, game_id) is None:
             # give the title an ID from the provided game_id (strip nx_)
-            hex_id = str(game_id).lstrip("nx_")
+            hex_id = str(game_id).removeprefix("nx_")
             title = {"id": hex_id, "name": name, "events": []}
             if data.get("users"):
                 data["users"][0].setdefault("titles", []).append(title)
@@ -222,7 +258,7 @@ class NXALGameTrackerAdapter:
 
     def delete_game(self, game_id):
         data = self._load()
-        hex_id = str(game_id).lstrip("nx_").lower()
+        hex_id = str(game_id).removeprefix("nx_").lower()
         for u in data.get("users", []):
             u["titles"] = [t for t in u.get("titles", [])
                            if str(t.get("id", "")).lower() != hex_id]
@@ -485,15 +521,30 @@ class NXALGameTrackerAdapter:
                 self.delete_session(d)
 
     def get_raw_export(self):
-        return self._load()
+        """Returns (games, sessions) to match the adapter contract.
+
+        The host unpacks this as a 2-tuple (database.py preview_db_merge and
+        apply_db_merge); returning the raw export dict instead raised
+        ValueError on both paths.
+        """
+        data = self._load()
+        games, sessions = [], []
+        for user_name, t in self._titles(data):
+            game_id = "nx_" + str(t.get("id", ""))
+            games.append({"game_id": game_id, "name": t.get("name", "Unknown")})
+            for group in _title_session_pairs([t]):
+                sessions.append({
+                    "game_id": game_id,
+                    "date_time": format_timestamp(group[0]["clockTimestamp"]),
+                    "duration": calculate_playtime(group),
+                })
+        return games, sessions
 
     def import_raw_data(self, games, sessions):
-        data = self._load()
         for g in games:
             self.add_game(g["game_id"], g["name"])
         for s in sessions:
             self.add_session(s["game_id"], s["date_time"], round(s["duration"]))
-        self._save(self._load())
 
     def backup_and_disable(self):
         import time
@@ -506,6 +557,7 @@ class NXALGameTrackerAdapter:
             "users": [], "version": 1,
             "generatedAt": data.get("generatedAt", 0),
         })
+        self._invalidate_cache()
         self.report(f"Backed up to {backup} and disabled '{self.display_name}'")
 
     # ---------- helpers for advanced ops (called by plugin_tools) ----------
@@ -514,7 +566,7 @@ class NXALGameTrackerAdapter:
         primary = self._find_title(data, primary_id)
         if primary is None:
             return
-        primary_hex = str(primary_id).lstrip("nx_").lower()
+        primary_hex = str(primary_id).removeprefix("nx_").lower()
         for d in duplicate_ids:
             dup = self._find_title(data, d)
             if dup is None:
@@ -524,7 +576,7 @@ class NXALGameTrackerAdapter:
             for u in data.get("users", []):
                 u["titles"] = [t for t in u.get("titles", [])
                                if str(t.get("id", "")).lower() != str(
-                                   str(d).lstrip("nx_")).lower()]
+                                   str(d).removeprefix("nx_")).lower()]
         self._recompute_title(data, primary)
         self._save(data)
 
