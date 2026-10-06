@@ -34,6 +34,7 @@ from nxal_common import (
     first_last_from_events,
     format_timestamp,
     load_json,
+    sort_events,
     write_export_json,
 )
 
@@ -283,14 +284,22 @@ class NXALGameTrackerAdapter:
             return
         start_ts = _parse_dt(start_time)
         events = title.setdefault("events", [])
+        duration = int(duration)
+        # One anchor for the whole synthesized block: steady stays monotonic
+        # inside it, matching what a real Launched…Closed group looks like.
+        anchor = _anchor_for(_event_anchors(events) or _all_anchors(data), start_ts)
         events.extend([
-            {"type": "Launched", "clockTimestamp": start_ts},
-            {"type": "Gained Focus", "clockTimestamp": start_ts + 2},
-            {"type": "Lost Focus", "clockTimestamp": start_ts + 2 + int(duration)},
-            {"type": "Closed", "clockTimestamp": start_ts + 6 + int(duration)},
+            {"type": "Launched", "clockTimestamp": start_ts,
+             "steadyTimestamp": _steady_from(anchor, start_ts)},
+            {"type": "Gained Focus", "clockTimestamp": start_ts + 2,
+             "steadyTimestamp": _steady_from(anchor, start_ts + 2)},
+            {"type": "Lost Focus", "clockTimestamp": start_ts + 2 + duration,
+             "steadyTimestamp": _steady_from(anchor, start_ts + 2 + duration)},
+            {"type": "Closed", "clockTimestamp": start_ts + 6 + duration,
+             "steadyTimestamp": _steady_from(anchor, start_ts + 6 + duration)},
         ])
-        # keep events sorted by clockTimestamp
-        events.sort(key=lambda e: e["clockTimestamp"])
+        # canonical (clock, steady) order — see nxal_common.sort_events
+        events[:] = sort_events(events)
         self._recompute_title(data, title)
         self._save(data)
 
@@ -302,7 +311,7 @@ class NXALGameTrackerAdapter:
         data = self._load()
         target = _parse_dt(original_date_time)
         for user_name, t in self._titles(data):
-            events = t.get("events", [])
+            events = t.setdefault("events", [])
             # find the group starting at target
             group_start = None
             for i, ev in enumerate(events):
@@ -348,7 +357,7 @@ class NXALGameTrackerAdapter:
         for user_name, t in self._titles(data):
             if str(t.get("id", "")).lower() != hex_id.lower():
                 continue
-            events = t.get("events", [])
+            events = t.setdefault("events", [])
             # find the group starting at target
             group_start = None
             for i, ev in enumerate(events):
@@ -409,7 +418,7 @@ class NXALGameTrackerAdapter:
         new_ts = _parse_dt(new_start)
         data = self._load()
         for user_name, t in self._titles(data):
-            events = t.get("events", [])
+            events = t.setdefault("events", [])
             for ev in events:
                 if ev.get("clockTimestamp") == target_ts:
                     # re-point this one event; guard: Launched/Closed are the
@@ -417,7 +426,7 @@ class NXALGameTrackerAdapter:
                     if ev.get("type") in ("Launched", "Closed"):
                         continue
                     ev["clockTimestamp"] = new_ts
-                    events.sort(key=lambda e: e["clockTimestamp"])
+                    events[:] = sort_events(events)
                     self._recompute_title(data, t)
                     self._save(data)
                     return
@@ -431,13 +440,18 @@ class NXALGameTrackerAdapter:
         for user_name, t in self._titles(data):
             if str(t.get("id", "")).lower() != hex_id.lower():
                 continue
-            events = t.get("events", [])
+            events = t.setdefault("events", [])
             base = _parse_dt(start_time)
             # insert a synthetic Gained/Lost Focus pair at start_time -> this
             # SPLITS the current focus pair in two, inserting a pause between.
-            events.append({"type": "Gained Focus", "clockTimestamp": base})
-            events.append({"type": "Lost Focus", "clockTimestamp": base + int(duration)})
-            events.sort(key=lambda e: e["clockTimestamp"])
+            gained = base
+            lost = base + int(duration)
+            anchor = _anchor_for(_event_anchors(events) or _all_anchors(data), gained)
+            events.append({"type": "Gained Focus", "clockTimestamp": gained,
+                           "steadyTimestamp": _steady_from(anchor, gained)})
+            events.append({"type": "Lost Focus", "clockTimestamp": lost,
+                           "steadyTimestamp": _steady_from(anchor, lost)})
+            events[:] = sort_events(events)
             self._recompute_title(data, t)
             self._save(data)
             return
@@ -447,7 +461,7 @@ class NXALGameTrackerAdapter:
         ts = _parse_dt(part_id)
         data = self._load()
         for user_name, t in self._titles(data):
-            events = t.get("events", [])
+            events = t.setdefault("events", [])
             for i, ev in enumerate(events):
                 if ev.get("clockTimestamp") == ts:
                     # guard: Launched/Closed are the group boundaries — both stay
@@ -515,10 +529,58 @@ class NXALGameTrackerAdapter:
         return self.fetch_dashboard_data()[1]
 
     def apply_merges(self, merges_list):
-        for primary_dt, new_dur, doomed in merges_list:
-            self.update_session(None, new_dur, primary_dt, primary_dt)
+        """Collapses adjacent sessions into one spanning session.
+
+        The host sends payload strings, not tuples:
+            primary_date_time|new_duration|doomed_date_times[,..]
+        Trailing session-id fields are appended for adapters that expose
+        them; NXAL does not, so they are ignored if present.
+
+        The primary's game must be resolved before anything is mutated —
+        add_session(game_id, ...) with game_id None used to fabricate a
+        title literally named 'None' in the export.
+        """
+        for payload in merges_list:
+            parts = str(payload).split('|')
+            if len(parts) < 3:
+                self.report(
+                    f"Merge skipped: unparseable payload {payload!r}")
+                continue
+
+            primary_dt, new_dur, doomed_csv = parts[0], parts[1], parts[2]
+            doomed = [d for d in doomed_csv.split(',') if d]
+
+            try:
+                new_dur = float(new_dur)
+            except ValueError:
+                self.report(
+                    f"Merge skipped: non-numeric duration {new_dur!r}")
+                continue
+
+            data = self._load()
+            game_id = self._game_id_for_session(data, primary_dt)
+            if game_id is None:
+                self.report(
+                    f"Merge skipped: no session starting at {primary_dt}")
+                continue
+
+            # Set the surviving span first, then drop the sessions it absorbed.
+            self.update_session(game_id, new_dur, primary_dt, primary_dt)
             for d in doomed:
                 self.delete_session(d)
+
+    def _game_id_for_session(self, data, date_time):
+        """Returns the 'nx_<hex>' id of the title owning a session start,
+        or None when nothing starts there."""
+        try:
+            target = _parse_dt(date_time)
+        except (TypeError, ValueError):
+            return None
+        for _, title in self._titles(data):
+            for group in _title_session_pairs([title]):
+                if group[0].get("clockTimestamp") == target:
+                    return "nx_" + str(title.get("id", ""))
+        return None
 
     def get_raw_export(self):
         """Returns (games, sessions) to match the adapter contract.
@@ -590,3 +652,54 @@ def _parse_dt(value):
     if "." in s:
         s = s.split(".")[0]
     return int(datetime.strptime(s, "%Y-%m-%d %H:%M:%S").timestamp())
+
+
+def _anchor_for(anchors, clock):
+    """Pick the (steady, clock) anchor to derive `clock` from.
+
+    Prefer the nearest preceding anchor, then the nearest following one.
+    """
+    preceding = [a for a in anchors if a[1] <= clock]
+    following = [a for a in anchors if a[1] > clock]
+    if preceding:
+        return max(preceding, key=lambda a: a[1])
+    if following:
+        return min(following, key=lambda a: a[1])
+    return None
+
+
+def _steady_from(anchor, clock):
+    """steadyTimestamp for `clock` given an (anchor steady, anchor clock).
+
+    steadyTimestamp is the monotonic seconds-since-boot clock; across one
+    boot session it advances in lockstep with clockTimestamp, so the offset
+    from a neighbour carries over:
+        steady = anchor steady + (clock - anchor clock).
+    """
+    if anchor is None:
+        return 0
+    return anchor[0] + (clock - anchor[1])
+
+
+def _event_anchors(events):
+    """Extract valid (steady, clock) anchor pairs from an event list."""
+    return [
+        (ev["steadyTimestamp"], ev["clockTimestamp"])
+        for ev in events
+        if isinstance(ev.get("steadyTimestamp"), int)
+        and isinstance(ev.get("clockTimestamp"), int)
+    ]
+
+
+def _all_anchors(data):
+    """Anchor pairs from every title in the export.
+
+    Used when a title has no events yet (a game created by add_game), so a
+    brand-new session still gets a steadyTimestamp consistent with the
+    console's real boot offsets instead of a bogus 0.
+    """
+    anchors = []
+    for user in data.get("users", []):
+        for title in user.get("titles", []):
+            anchors.extend(_event_anchors(title.get("events", [])))
+    return anchors
