@@ -28,6 +28,7 @@ from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from database import AdapterOperationError
 from nxal_common import (
     calculate_playtime,
     count_launches,
@@ -313,7 +314,9 @@ class NXALGameTrackerAdapter:
             data = self._load()
             title = self._find_title(data, game_id)
         if title is None:
-            return
+            raise AdapterOperationError(
+                f"Could not create or find title {game_id!r} in "
+                f"'{self.display_name}'.")
         start_ts = _parse_dt(start_time)
         events = title.setdefault("events", [])
         duration = int(duration)
@@ -342,6 +345,7 @@ class NXALGameTrackerAdapter:
     def delete_session(self, original_date_time):
         data = self._load()
         target = _parse_dt(original_date_time)
+        found = False
         for user_name, t in self._titles(data):
             events = t.setdefault("events", [])
             # find the group starting at target
@@ -352,6 +356,7 @@ class NXALGameTrackerAdapter:
                     break
             if group_start is None:
                 continue
+            found = True
             end_i = group_start + 1
             while end_i < len(events) and events[end_i].get("type") != "Closed":
                 end_i += 1
@@ -359,6 +364,10 @@ class NXALGameTrackerAdapter:
                 end_i += 1  # include the Closed event
             del events[group_start:end_i]
             self._recompute_title(data, t)
+        if not found:
+            raise AdapterOperationError(
+                f"No session starts at {original_date_time!r} "
+                f"in '{self.display_name}'.")
         self._save(data)
 
     # --- Optional capability: session PARTS (per-event detail surface) ---
@@ -456,13 +465,16 @@ class NXALGameTrackerAdapter:
                     # re-point this one event; guard: Launched/Closed are the
                     # group boundaries — both stay put (never drift the group).
                     if ev.get("type") in ("Launched", "Closed"):
-                        continue
+                        raise AdapterOperationError(
+                            "Launched and Closed parts anchor the session and "
+                            "cannot be moved.")
                     ev["clockTimestamp"] = new_ts
                     events[:] = sort_events(events)
                     self._recompute_title(data, t)
                     self._save(data)
                     return
-        self._save(data)
+        raise AdapterOperationError(
+            f"No session part starts at {part_id!r} in '{self.display_name}'.")
 
     def add_session_part(self, game_id, start_time, duration):
         data = self._load()
@@ -487,7 +499,8 @@ class NXALGameTrackerAdapter:
             self._recompute_title(data, t)
             self._save(data)
             return
-        self._save(data)
+        raise AdapterOperationError(
+            f"Could not find title {game_id!r} in '{self.display_name}'.")
 
     def delete_session_part(self, part_id):
         ts = _parse_dt(part_id)
@@ -498,12 +511,15 @@ class NXALGameTrackerAdapter:
                 if ev.get("clockTimestamp") == ts:
                     # guard: Launched/Closed are the group boundaries — both stay
                     if ev.get("type") in ("Launched", "Closed"):
-                        continue
+                        raise AdapterOperationError(
+                            "Launched and Closed parts anchor the session and "
+                            "cannot be deleted.")
                     del events[i]
                     self._recompute_title(data, t)
                     self._save(data)
                     return
-        self._save(data)
+        raise AdapterOperationError(
+            f"No session part starts at {part_id!r} in '{self.display_name}'.")
 
     def recalculate_totals(self):
         data = self._load()
@@ -529,14 +545,9 @@ class NXALGameTrackerAdapter:
         return []
 
     def apply_rounding(self, dates_list):
-        for d in dates_list:
-            try:
-                target, new_dur = d["date_time"], d["duration"]
-            except (KeyError, TypeError):
-                continue
-            self.update_session(d.get("game_id", None),
-                                round(float(new_dur)),
-                                target, target)
+        raise AdapterOperationError(
+            "NXAL session durations are derived from focus events; "
+            "there is no fractional duration to round.")
 
     def get_cleanup_candidates(self, threshold_seconds):
         cands = []
@@ -575,26 +586,24 @@ class NXALGameTrackerAdapter:
         for payload in merges_list:
             parts = str(payload).split('|')
             if len(parts) < 3:
-                self.report(
-                    f"Merge skipped: unparseable payload {payload!r}")
-                continue
+                raise AdapterOperationError(
+                    f"Unparseable merge payload {payload!r}.")
 
             primary_dt, new_dur, doomed_csv = parts[0], parts[1], parts[2]
             doomed = [d for d in doomed_csv.split(',') if d]
 
             try:
                 new_dur = float(new_dur)
-            except ValueError:
-                self.report(
-                    f"Merge skipped: non-numeric duration {new_dur!r}")
-                continue
+            except ValueError as error:
+                raise AdapterOperationError(
+                    f"Non-numeric merge duration {new_dur!r}.") from error
 
             data = self._load()
             game_id = self._game_id_for_session(data, primary_dt)
             if game_id is None:
-                self.report(
-                    f"Merge skipped: no session starting at {primary_dt}")
-                continue
+                raise AdapterOperationError(
+                    f"No session starts at {primary_dt} in "
+                    f"'{self.display_name}'.")
 
             # Set the surviving span first, then drop the sessions it absorbed.
             self.update_session(game_id, new_dur, primary_dt, primary_dt)
@@ -659,7 +668,9 @@ class NXALGameTrackerAdapter:
         data = self._load()
         primary = self._find_title(data, primary_id)
         if primary is None:
-            return
+            raise AdapterOperationError(
+                f"Could not find title {primary_id!r} in "
+                f"'{self.display_name}'.")
         primary_hex = str(primary_id).removeprefix("nx_").lower()
         for d in duplicate_ids:
             dup = self._find_title(data, d)
