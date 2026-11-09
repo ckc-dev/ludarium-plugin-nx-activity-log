@@ -83,6 +83,14 @@ class NXALGameTrackerAdapter:
         self._cache = None
         self._cache_stamp = None
 
+    # NXAL supports live edits, but its raw export/import round-trip is
+    # lossy (users/events are reconstructed), so it must not be offered as a
+    # database-merge endpoint until that contract is made complete.
+    supports_session_write = True
+    supports_game_write = True
+    supports_game_merge = True
+    supports_raw_transfer = False
+
     # ---------- host integration ----------
     def report(self, message):
         if not hasattr(self, "_messages"):
