@@ -588,7 +588,7 @@ class NXALGameTrackerAdapter:
     def get_round_candidates(self):
         return []
 
-    def apply_rounding(self, dates_list):
+    def apply_rounding(self, sessions):
         raise AdapterOperationError(
             "NXAL session durations are derived from focus events; "
             "there is no fractional duration to round.")
@@ -609,40 +609,24 @@ class NXALGameTrackerAdapter:
                     })
         return cands
 
-    def apply_cleanup(self, dates_list):
-        for original_date_time in dates_list:
-            self.delete_session(original_date_time)
+    def apply_cleanup(self, sessions):
+        for ref in sessions:
+            self.delete_session(ref.date_time)
 
     def get_sessions_chronological(self):
         return self.fetch_dashboard_data()[1]
 
-    def apply_merges(self, merges_list):
+    def apply_merges(self, merges):
         """Collapses adjacent sessions into one spanning session.
 
-        The host sends payload strings, not tuples:
-            primary_date_time|new_duration|doomed_date_times[,..]
-        Trailing session-id fields are appended for adapters that expose
-        them; NXAL does not, so they are ignored if present.
-
-        The primary's game must be resolved before anything is mutated —
-        add_session(game_id, ...) with game_id None used to fabricate a
-        title literally named 'None' in the export.
+        The host passes typed ``SessionMerge`` requests. The primary's game
+        must be resolved before anything is mutated — add_session(game_id,
+        ...) with game_id None used to fabricate a title literally named
+        'None' in the export.
         """
-        for payload in merges_list:
-            parts = str(payload).split('|')
-            if len(parts) < 3:
-                raise AdapterOperationError(
-                    f"Unparseable merge payload {payload!r}.")
-
-            primary_dt, new_dur, doomed_csv = parts[0], parts[1], parts[2]
-            doomed = [d for d in doomed_csv.split(',') if d]
-
-            try:
-                new_dur = float(new_dur)
-            except ValueError as error:
-                raise AdapterOperationError(
-                    f"Non-numeric merge duration {new_dur!r}.") from error
-
+        for merge in merges:
+            primary_dt = merge.primary.date_time
+            new_duration = float(merge.duration)
             data = self._load()
             game_id = self._game_id_for_session(data, primary_dt)
             if game_id is None:
@@ -651,9 +635,10 @@ class NXALGameTrackerAdapter:
                     f"'{self.display_name}'.")
 
             # Set the surviving span first, then drop the sessions it absorbed.
-            self.update_session(game_id, new_dur, primary_dt, primary_dt)
-            for d in doomed:
-                self.delete_session(d)
+            self.update_session(
+                game_id, new_duration, primary_dt, primary_dt)
+            for ref in merge.absorbed:
+                self.delete_session(ref.date_time)
 
     def _game_id_for_session(self, data, date_time):
         """Returns the 'nx_<hex>' id of the title owning a session start,

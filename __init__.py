@@ -25,7 +25,7 @@ PLUGIN_DISPLAY_NAME = "NX-ActivityLog"
 PLUGIN_VERSION = "0.1.0"
 PLUGIN_AUTHOR = "GameTime"
 PLUGIN_DESCRIPTION = "Live read/write adapter over an NXAL import.json export"
-PLUGIN_API_VERSION = 1
+PLUGIN_API_VERSION = 2
 
 PLUGIN_CONFIG_SCHEMA = [
     {
