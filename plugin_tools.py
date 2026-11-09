@@ -7,12 +7,11 @@ from nxal_common import (load_json, write_export_json, count_launches,
 
 def _path(params, ctx):
     path = (params.get("path") or "").strip()
-    if path and os.path.isfile(path):
-        return path, None
-    hint = ctx.get_setting("import_path_hint", "").strip()
-    if hint and os.path.isfile(hint):
-        return hint, None
-    return None, f"Provide a path to an NXAL import.json (or set import_path_hint)."
+    if not path:
+        return None, "Provide a path to an NXAL import.json."
+    if not os.path.isfile(path):
+        return None, f"File not found: {path}"
+    return path, None
 
 
 def verify_export(params, ctx):
@@ -65,16 +64,16 @@ PLUGIN_TOOLS = [
      "description": "Validate users/titles/launches/playtime in an NXAL export.",
      "fields": [
          {"name": "path", "label": "Export path", "type": "path",
-          "required": False,
-          "help": "Leave empty to reuse the environment import_path_hint."},
+          "required": True,
+          "help": "Absolute path to the NXAL import.json export."},
      ],
      "execute": verify_export},
     {"key": "fix_import", "name": "Fix export",
      "description": "Deduplicate + sort events, write back byte-compatibly.",
      "fields": [
          {"name": "path", "label": "Export path", "type": "path",
-          "required": False,
-          "help": "Leave empty to reuse the environment import_path_hint."},
+          "required": True,
+          "help": "Absolute path to the NXAL import.json export."},
      ],
      "execute": fix_import},
 ]

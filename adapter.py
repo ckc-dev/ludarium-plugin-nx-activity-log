@@ -21,6 +21,7 @@ plugin_health.py and reuse the in-repo CLI logic (nxal_common + merge_exports /
 deduplicate_exports / fix_import / validate_import).
 """
 
+import json
 import os
 import sys
 import shutil
@@ -77,10 +78,11 @@ class NXALGameTrackerAdapter:
         self.source_id = source_id
         self.display_name = display_name
         self.path = path
-        self.default_user_id = default_user_id
         self.type = "nx_activity_log"
         self._messages = []
         self.config = config or {}
+        self.default_user_id = self._config_default_user(default_user_id)
+        self.profile_mapping = self._config_profile_mapping()
         self._cache = None
         self._cache_stamp = None
 
@@ -102,6 +104,54 @@ class NXALGameTrackerAdapter:
         msgs = getattr(self, "_messages", [])
         self._messages = []
         return msgs
+
+    # ---------- per-environment identity config ----------
+    def _config_default_user(self, fallback):
+        """The environment default, with a legacy config override if set."""
+        raw = self.config.get("default_user_id")
+        if raw in (None, ""):
+            return fallback
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            self.report(
+                f"Ignoring invalid default_user_id config: {raw!r}")
+            return fallback
+
+    def _config_profile_mapping(self):
+        """Map an NXAL profile name to a GameTime user id.
+
+        The value is stored as a JSON object in environments.config because
+        the environment form only has scalar fields. A malformed mapping is
+        reported and treated as empty rather than breaking the dashboard.
+        """
+        raw = self.config.get("profile_mapping")
+        if raw in (None, ""):
+            return {}
+        if isinstance(raw, dict):
+            mapping = raw
+        else:
+            try:
+                mapping = json.loads(raw)
+            except (TypeError, ValueError):
+                self.report("Ignoring invalid profile_mapping JSON.")
+                return {}
+        if not isinstance(mapping, dict):
+            self.report("profile_mapping must be a JSON object.")
+            return {}
+        result = {}
+        for name, user_id in mapping.items():
+            try:
+                result[str(name).strip().casefold()] = int(user_id)
+            except (TypeError, ValueError):
+                self.report(
+                    f"Ignoring invalid profile mapping for {name!r}: "
+                    f"{user_id!r}")
+        return result
+
+    def _user_id_for(self, user_name):
+        key = str(user_name or "").strip().casefold()
+        return self.profile_mapping.get(key, self.default_user_id)
 
     # ---------- storage ----------
     #
@@ -204,7 +254,7 @@ class NXALGameTrackerAdapter:
                 sessions.append({
                     "game_id": game_id,
                     "name": t.get("name", "Unknown"),
-                    "user": user_name,
+                    "native_user_id": self._user_id_for(user_name),
                     "date_time": format_timestamp(start_ts),
                     "duration": duration,
                 })
@@ -216,7 +266,7 @@ class NXALGameTrackerAdapter:
                     sessions.append({
                         "game_id": game_id,
                         "name": t.get("name", "Unknown"),
-                        "user": self.default_user_id,
+                        "native_user_id": self.default_user_id,
                         "date_time": format_timestamp(first_ts),
                         "duration": stored,
                     })
@@ -235,7 +285,7 @@ class NXALGameTrackerAdapter:
             sessions.append({
                 "game_id": g["game_id"],
                 "name": g.get("name", "Unknown"),
-                "user": self.default_user_id,
+                "native_user_id": self.default_user_id,
                 "date_time": format_timestamp(first_ts),
                 "duration": stored,
             })
@@ -555,6 +605,7 @@ class NXALGameTrackerAdapter:
                         "duration": duration,
                         "game_id": "nx_" + str(t["id"]),
                         "name": t.get("name", "Unknown"),
+                        "native_user_id": self._user_id_for(user_name),
                     })
         return cands
 
