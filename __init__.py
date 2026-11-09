@@ -22,6 +22,7 @@ if _this_dir not in sys.path:
 
 PLUGIN_TYPE = "nx_activity_log"
 PLUGIN_DISPLAY_NAME = "NX-ActivityLog"
+PLUGIN_TEMPLATE_NAMESPACE = "nx_activity_log"
 PLUGIN_VERSION = "0.1.0"
 PLUGIN_AUTHOR = "GameTime"
 PLUGIN_DESCRIPTION = "Live read/write adapter over an NXAL import.json export"
