@@ -24,7 +24,7 @@ deduplicate_exports / fix_import / validate_import).
 import os
 import sys
 import shutil
-from datetime import datetime, timedelta
+from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -206,8 +206,6 @@ class NXALGameTrackerAdapter:
                     "name": t.get("name", "Unknown"),
                     "user": user_name,
                     "date_time": format_timestamp(start_ts),
-                    "start_dt": datetime.fromtimestamp(start_ts),
-                    "end_dt": datetime.fromtimestamp(start_ts + duration),
                     "duration": duration,
                 })
                 total += duration
@@ -220,8 +218,6 @@ class NXALGameTrackerAdapter:
                         "name": t.get("name", "Unknown"),
                         "user": self.default_user_id,
                         "date_time": format_timestamp(first_ts),
-                        "start_dt": datetime.fromtimestamp(first_ts),
-                        "end_dt": datetime.fromtimestamp(first_ts + stored),
                         "duration": stored,
                     })
                     total += stored
@@ -241,8 +237,6 @@ class NXALGameTrackerAdapter:
                 "name": g.get("name", "Unknown"),
                 "user": self.default_user_id,
                 "date_time": format_timestamp(first_ts),
-                "start_dt": datetime.fromtimestamp(first_ts),
-                "end_dt": datetime.fromtimestamp(first_ts + stored),
                 "duration": stored,
             })
             total += stored
