@@ -29,7 +29,7 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from database import AdapterOperationError
+from plugin_sdk import AdapterOperationError
 from nxal_common import (
     calculate_playtime,
     count_launches,
