@@ -1,4 +1,4 @@
-"""GameTime host manifest: NX-ActivityLog adapter.
+"""Ludarium host manifest: NX-ActivityLog adapter.
 
 Discovery contract (host reads these module attributes):
   PLUGIN_TYPE, PLUGIN_DISPLAY_NAME, PLUGIN_VERSION, PLUGIN_AUTHOR,
@@ -24,7 +24,7 @@ PLUGIN_TYPE = "nx_activity_log"
 PLUGIN_DISPLAY_NAME = "NX-ActivityLog"
 PLUGIN_TEMPLATE_NAMESPACE = "nx_activity_log"
 PLUGIN_VERSION = "0.1.0"
-PLUGIN_AUTHOR = "GameTime"
+PLUGIN_AUTHOR = "Ludarium"
 PLUGIN_DESCRIPTION = "Live read/write adapter over an NXAL import.json export"
 PLUGIN_API_VERSION = 2
 
@@ -34,7 +34,7 @@ PLUGIN_CONFIG_SCHEMA = [
         "label": "Profile mapping (JSON)",
         "type": "text",
         "default": "{}",
-        "help": ("Map NXAL profile/user name -> GameTime user id as a JSON "
+        "help": ("Map NXAL profile/user name -> Ludarium user id as a JSON "
                  "object, e.g. {\"Grog\": 1}. Unmapped profiles use the "
                  "environment's default user."),
     },

@@ -287,7 +287,7 @@ def validate_events(prefix, events, summary, result):
                     f"{prefix}: summary.lastPlayed ({lp}) != last Lost Focus ({last_focus})"
                 )
         else:
-            last_event = timestamps[-1]
+            last_event = events[-1].get("clockTimestamp") if events else None
             result.warn(
                 f"{prefix}: no Lost Focus events, lastPlayed ({lp}) vs last event ({last_event})"
             )

@@ -1,4 +1,4 @@
-"""GameTime: PLUGIN_HEALTH for the NXAL adapter (export-level checks).
+"""Ludarium: PLUGIN_HEALTH for the NXAL adapter (export-level checks).
 
 Signature honored by the host: ``PLUGIN_HEALTH(path, config, ctx) -> [{'level','message'}]``
 """

@@ -1,4 +1,4 @@
-"""GameTime: PLUGIN_BLUEPRINT + PLUGIN_NAV for the NXAL adapter."""
+"""Ludarium: PLUGIN_BLUEPRINT + PLUGIN_NAV for the NXAL adapter."""
 
 from flask import Blueprint, render_template
 

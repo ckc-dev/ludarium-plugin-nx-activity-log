@@ -1,6 +1,6 @@
 """NX-ActivityLog live adapter — read/write over a single NXAL import.json.
 
-The GameTime host treats an environment of type `nx_activity_log` as a LIVE
+The Ludarium host treats an environment of type `nx_activity_log` as a LIVE
 source backed by one `import.json` export (the adapters' env path). All reads
 are derived from the JSON on each call; all mutations write back through
 `nxal_codec.write_export_json` so the file stays byte-compatible with a
@@ -96,7 +96,7 @@ class NXALGameTrackerAdapter:
             return fallback
 
     def _config_profile_mapping(self):
-        """Map an NXAL profile name to a GameTime user id.
+        """Map an NXAL profile name to a Ludarium user id.
 
         The value is stored as a JSON object in environments.config because
         the environment form only has scalar fields. A malformed mapping is
