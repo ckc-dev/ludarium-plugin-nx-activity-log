@@ -11,7 +11,11 @@ from plugin_system import (
     current_plugin_context,
     registry,
 )
-from tests import support  # noqa: F401  (isolates the metadata database)
+
+os.environ.setdefault(
+    "LUDARIUM_TEST_PLUGIN_DIRS",
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from tests import support  # noqa: E402,F401  (isolates metadata + plugins)
 
 
 class TestPluginContext(unittest.TestCase):

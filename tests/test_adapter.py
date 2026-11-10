@@ -6,7 +6,11 @@ import tempfile
 import unittest
 
 from plugins.nx_activity_log.adapter import NXALGameTrackerAdapter
-from tests import support  # noqa: F401  (isolates the metadata database)
+
+os.environ.setdefault(
+    "LUDARIUM_TEST_PLUGIN_DIRS",
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from tests import support  # noqa: E402,F401  (isolates metadata + plugins)
 from trackers.aggregator import TrackerAggregator
 
 START = 1767225600
