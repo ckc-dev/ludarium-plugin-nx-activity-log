@@ -16,11 +16,15 @@ jobs:
         python-version: ["3.11", "3.14"]
 
     steps:
+      # Both repositories are private. HOST_REPO_TOKEN must be a fine-grained
+      # token with read-only access to ckc-dev/ludarium, stored as a secret in
+      # this plugin repository. The plugin checkout uses this repo's token.
       - name: Check out Ludarium
         uses: actions/checkout@v7
         with:
           repository: ckc-dev/ludarium
           path: host
+          token: ${{ secrets.HOST_REPO_TOKEN }}
 
       - name: Check out this plugin
         uses: actions/checkout@v7

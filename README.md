@@ -35,3 +35,11 @@ ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
 FOR A PARTICULAR PURPOSE. See [`LICENSE`](LICENSE) for the full terms.
 
 Copyright (C) 2026 Ludarium contributors.
+
+## Continuous integration
+
+The plugin CI checks out the private Ludarium host into a temporary `host/`
+directory so the plugin can run its full integration suite against the current
+host contract. The workflow requires a repository secret named
+`HOST_REPO_TOKEN`: a fine-grained token with read-only access to
+`ckc-dev/ludarium`. No host code is vendored or linked into this repository.
