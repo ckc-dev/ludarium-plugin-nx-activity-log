@@ -13,21 +13,21 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.13"]
+        python-version: ["3.11", "3.14"]
 
     steps:
       - name: Check out Ludarium
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ckc-dev/ludarium
           path: host
 
       - name: Check out this plugin
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: host/plugins/nx_activity_log
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
