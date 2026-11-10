@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
+
+    steps:
+      - name: Check out Ludarium
+        uses: actions/checkout@v4
+        with:
+          repository: ckc-dev/ludarium
+          path: host
+
+      - name: Check out this plugin
+        uses: actions/checkout@v4
+        with:
+          path: host/plugins/nx_activity_log
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: host/requirements-dev.txt
+
+      - name: Install host dependencies
+        run: pip install -r host/requirements-dev.txt
+
+      - name: Compile plugin sources
+        working-directory: host/plugins/nx_activity_log
+        run: python -m compileall -q adapter.py nxal_codec.py tests
+
+      - name: Lint
+        working-directory: host/plugins/nx_activity_log
+        run: ruff check .
+
+      - name: Unit tests
+        working-directory: host/plugins/nx_activity_log
+        env:
+          PYTHONPATH: ${{ github.workspace }}/host
+        run: python -m unittest discover -s tests -q
+
+      - name: Coverage report
+        working-directory: host/plugins/nx_activity_log
+        env:
+          PYTHONPATH: ${{ github.workspace }}/host
+        run: |
+          python -m coverage run --include='*/plugins/nx_activity_log/adapter.py,*/plugins/nx_activity_log/nxal_codec.py,*/plugins/nx_activity_log/plugin_tools.py,*/plugins/nx_activity_log/plugin_health.py' -m unittest discover -s tests -q
+          python -m coverage report --fail-under=75 -m
