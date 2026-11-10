@@ -1,6 +1,6 @@
 import os
 
-from nxal_common import (load_json, write_export_json, count_launches,
+from nxal_codec import (load_json, write_export_json, count_launches,
                          calculate_playtime, find_duplicate_events,
                          deduplicate_events, sort_events)
 

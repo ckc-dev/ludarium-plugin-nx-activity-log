@@ -1,9 +1,9 @@
 """NX-ActivityLog live adapter — read/write over a single NXAL import.json.
 
 The GameTime host treats an environment of type `nx_activity_log` as a LIVE
-source backed by one \`import.json\` export (the adapters' env path). All reads
+source backed by one `import.json` export (the adapters' env path). All reads
 are derived from the JSON on each call; all mutations write back through
-\nxal_common.write_export_json\` so the file stays byte-compatible with a
+`nxal_codec.write_export_json` so the file stays byte-compatible with a
 pristine NXAL export (sorted keys, UTF-8 literal, trailing newline).
 
 Session model (mirrors NXAL / PlayData.cpp):
@@ -12,24 +12,28 @@ Session model (mirrors NXAL / PlayData.cpp):
   - duration    = focus-pair arithmetic over steadyTimestamp between the
                   group's Gained Focus / Lost Focus events (calculate_playtime)
   - game        = the title; game_id = 'nx_' + title.id (hex), name = title.name
-  - firstPlayed/lastPlayed/lastPlayed derived via nxal_common (first Login /
+  - firstPlayed/lastPlayed/lastPlayed derived via nxal_codec (first Login /
     last Lost Focus semantics, falling back to event extremes).
 
 The 18-method surface below is the GameTrackerAdapter contract. The heavy
 advanced operations (merge/dedup/verify/fix) live in plugin_tools.py /
-plugin_health.py and reuse the in-repo CLI logic (nxal_common + merge_exports /
+plugin_health.py and reuse the in-repo CLI logic (nxal_codec + merge_exports /
 deduplicate_exports / fix_import / validate_import).
 """
 
 import json
 import os
 import sys
-from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from plugin_sdk import AdapterOperationError
-from nxal_common import (
+from nxal_codec import (
+    _all_anchors,
+    _anchor_for,
+    _event_anchors,
+    _parse_dt,
+    _steady_from,
+    _title_session_pairs,
     calculate_playtime,
     count_launches,
     first_last_from_events,
@@ -38,35 +42,9 @@ from nxal_common import (
     sort_events,
     write_export_json,
 )
+from plugin_sdk import AdapterOperationError
 
 MIN_SESSION_DURATION = 300  # 5 minutes; NXAL ignores shorter focus pairs
-
-
-def _title_session_pairs(titles):
-    """Yield (user_name, title, event_group) for every Launched…Closed group.
-
-    A group opens at a "Launched" event and closes at the next "Closed"
-    event. If a title ends without a "Closed" (crash), the group is still
-    emitted using the remaining events (duration may be partial).
-    """
-    for t in titles:
-        group = []
-        in_group = False
-        for ev in t.get("events", []):
-            if ev.get("type") == "Launched":
-                if group and any(e["type"] == "Launched" for e in group):
-                    yield group
-                group = [ev]
-                in_group = True
-            elif in_group:
-                group.append(ev)
-                if ev.get("type") == "Closed":
-                    yield group
-                    group = []
-                    in_group = False
-        if group and any(e["type"] == "Launched" for e in group):
-            yield group
-    return
 
 
 class NXALGameTrackerAdapter:
@@ -241,7 +219,6 @@ class NXALGameTrackerAdapter:
     def fetch_dashboard_data(self):
         data = self._load()
         games_list = self._game_entries(data)
-        stored_by_game = {g["game_id"]: g.get("stored_duration", 0) for g in games_list}
         sessions, total = [], 0
         for user_name, t in self._titles(data):
             game_id = "nx_" + str(t["id"])
@@ -376,7 +353,7 @@ class NXALGameTrackerAdapter:
             {"type": "Closed", "clockTimestamp": start_ts + 6 + duration,
              "steadyTimestamp": _steady_from(anchor, start_ts + 6 + duration)},
         ])
-        # canonical (clock, steady) order — see nxal_common.sort_events
+        # canonical (clock, steady) order — see nxal_codec.sort_events
         events[:] = sort_events(events)
         self._recompute_title(data, title)
         self._save(data)
@@ -677,7 +654,6 @@ class NXALGameTrackerAdapter:
             raise AdapterOperationError(
                 f"Could not find title {primary_id!r} in "
                 f"'{self.display_name}'.")
-        primary_hex = str(primary_id).removeprefix("nx_").lower()
         for d in duplicate_ids:
             dup = self._find_title(data, d)
             if dup is None:
@@ -690,65 +666,3 @@ class NXALGameTrackerAdapter:
                                    str(d).removeprefix("nx_")).lower()]
         self._recompute_title(data, primary)
         self._save(data)
-
-
-def _parse_dt(value):
-    """Parse 'YYYY-MM-DD HH:MM:SS' or ISO 'T' into epoch seconds."""
-    if isinstance(value, (int, float)):
-        return int(value)
-    s = str(value).strip()
-    s = s.replace("T", " ")
-    if "." in s:
-        s = s.split(".")[0]
-    return int(datetime.strptime(s, "%Y-%m-%d %H:%M:%S").timestamp())
-
-
-def _anchor_for(anchors, clock):
-    """Pick the (steady, clock) anchor to derive `clock` from.
-
-    Prefer the nearest preceding anchor, then the nearest following one.
-    """
-    preceding = [a for a in anchors if a[1] <= clock]
-    following = [a for a in anchors if a[1] > clock]
-    if preceding:
-        return max(preceding, key=lambda a: a[1])
-    if following:
-        return min(following, key=lambda a: a[1])
-    return None
-
-
-def _steady_from(anchor, clock):
-    """steadyTimestamp for `clock` given an (anchor steady, anchor clock).
-
-    steadyTimestamp is the monotonic seconds-since-boot clock; across one
-    boot session it advances in lockstep with clockTimestamp, so the offset
-    from a neighbour carries over:
-        steady = anchor steady + (clock - anchor clock).
-    """
-    if anchor is None:
-        return 0
-    return anchor[0] + (clock - anchor[1])
-
-
-def _event_anchors(events):
-    """Extract valid (steady, clock) anchor pairs from an event list."""
-    return [
-        (ev["steadyTimestamp"], ev["clockTimestamp"])
-        for ev in events
-        if isinstance(ev.get("steadyTimestamp"), int)
-        and isinstance(ev.get("clockTimestamp"), int)
-    ]
-
-
-def _all_anchors(data):
-    """Anchor pairs from every title in the export.
-
-    Used when a title has no events yet (a game created by add_game), so a
-    brand-new session still gets a steadyTimestamp consistent with the
-    console's real boot offsets instead of a bogus 0.
-    """
-    anchors = []
-    for user in data.get("users", []):
-        for title in user.get("titles", []):
-            anchors.extend(_event_anchors(title.get("events", [])))
-    return anchors

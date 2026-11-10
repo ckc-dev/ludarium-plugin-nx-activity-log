@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-nxal_common.py — Shared utilities for NX-ActivityLog verification scripts.
+nxal_codec.py — NXAL event, session and export codec helpers.
 
 Provides the canonical helpers shared across validate/fix/merge/dedup so
 they cannot drift apart: event identity (event_key/deduplicate_events),
@@ -298,3 +298,92 @@ class VerificationResult:
                 f"\nRESULT: FAILED — {len(self.errors)} error(s), "
                 f"{len(self.warnings)} warning(s)"
             )
+
+
+def _title_session_pairs(titles):
+    """Yield (user_name, title, event_group) for every Launched…Closed group.
+
+    A group opens at a "Launched" event and closes at the next "Closed"
+    event. If a title ends without a "Closed" (crash), the group is still
+    emitted using the remaining events (duration may be partial).
+    """
+    for t in titles:
+        group = []
+        in_group = False
+        for ev in t.get("events", []):
+            if ev.get("type") == "Launched":
+                if group and any(e["type"] == "Launched" for e in group):
+                    yield group
+                group = [ev]
+                in_group = True
+            elif in_group:
+                group.append(ev)
+                if ev.get("type") == "Closed":
+                    yield group
+                    group = []
+                    in_group = False
+        if group and any(e["type"] == "Launched" for e in group):
+            yield group
+    return
+
+
+def _parse_dt(value):
+    """Parse 'YYYY-MM-DD HH:MM:SS' or ISO 'T' into epoch seconds."""
+    if isinstance(value, (int, float)):
+        return int(value)
+    s = str(value).strip()
+    s = s.replace("T", " ")
+    if "." in s:
+        s = s.split(".")[0]
+    return int(datetime.strptime(s, "%Y-%m-%d %H:%M:%S").timestamp())
+
+
+def _anchor_for(anchors, clock):
+    """Pick the (steady, clock) anchor to derive `clock` from.
+
+    Prefer the nearest preceding anchor, then the nearest following one.
+    """
+    preceding = [a for a in anchors if a[1] <= clock]
+    following = [a for a in anchors if a[1] > clock]
+    if preceding:
+        return max(preceding, key=lambda a: a[1])
+    if following:
+        return min(following, key=lambda a: a[1])
+    return None
+
+
+def _steady_from(anchor, clock):
+    """steadyTimestamp for `clock` given an (anchor steady, anchor clock).
+
+    steadyTimestamp is the monotonic seconds-since-boot clock; across one
+    boot session it advances in lockstep with clockTimestamp, so the offset
+    from a neighbour carries over:
+        steady = anchor steady + (clock - anchor clock).
+    """
+    if anchor is None:
+        return 0
+    return anchor[0] + (clock - anchor[1])
+
+
+def _event_anchors(events):
+    """Extract valid (steady, clock) anchor pairs from an event list."""
+    return [
+        (ev["steadyTimestamp"], ev["clockTimestamp"])
+        for ev in events
+        if isinstance(ev.get("steadyTimestamp"), int)
+        and isinstance(ev.get("clockTimestamp"), int)
+    ]
+
+
+def _all_anchors(data):
+    """Anchor pairs from every title in the export.
+
+    Used when a title has no events yet (a game created by add_game), so a
+    brand-new session still gets a steadyTimestamp consistent with the
+    console's real boot offsets instead of a bogus 0.
+    """
+    anchors = []
+    for user in data.get("users", []):
+        for title in user.get("titles", []):
+            anchors.extend(_event_anchors(title.get("events", [])))
+    return anchors

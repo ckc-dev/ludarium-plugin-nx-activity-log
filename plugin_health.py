@@ -5,7 +5,7 @@ Signature honored by the host: ``PLUGIN_HEALTH(path, config, ctx) -> [{'level','
 
 import os
 
-from nxal_common import load_json, count_launches, calculate_playtime
+from nxal_codec import load_json, count_launches, calculate_playtime
 
 
 def check_path(path, config, ctx):

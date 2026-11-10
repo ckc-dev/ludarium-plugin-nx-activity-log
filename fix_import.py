@@ -19,7 +19,7 @@ import sys
 import os
 import shutil
 
-from nxal_common import (
+from nxal_codec import (
     calculate_playtime,
     count_launches,
     deduplicate_events,

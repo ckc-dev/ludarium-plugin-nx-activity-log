@@ -27,7 +27,7 @@ Exit code: 0 if all checks pass (warnings OK), 1 if any error is found.
 
 import sys
 
-from nxal_common import (
+from nxal_codec import (
     VALID_EVENT_TYPES,
     VerificationResult,
     calculate_playtime,

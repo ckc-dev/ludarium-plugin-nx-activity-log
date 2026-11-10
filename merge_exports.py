@@ -15,7 +15,7 @@ Exit code: 0 on success, 1 on error.
 import sys
 import os
 
-from nxal_common import (
+from nxal_codec import (
     calculate_playtime,
     count_launches,
     deduplicate_events,
