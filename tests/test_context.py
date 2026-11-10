@@ -69,7 +69,7 @@ class TestPluginContext(unittest.TestCase):
                 'default_user_id': 1,
             }
             client = support.get_app().test_client()
-            with patch('app.accounts.get_system_configs',
+            with patch('routes.tools.accounts.get_system_configs',
                        return_value=[config]):
                 response = client.get(
                     '/tools/nx_activity_log/verify_export')

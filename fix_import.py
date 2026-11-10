@@ -15,9 +15,9 @@ A backup of the original is always saved as <import.json>.bak before any fixes a
 Exit code: 0 on success, 1 if user declines any fix, 2 on error.
 """
 
-import sys
 import os
 import shutil
+import sys
 
 from nxal_codec import (
     calculate_playtime,
@@ -48,8 +48,8 @@ def fix_focus_errors(events, title_name):
     if len(indices) > 5:
         print(f"    ... and {len(indices) - 5} more")
 
-    print(f"\n  Fix: Insert 'Gained Focus' before each orphaned 'Lost Focus'")
-    print(f"       Timestamp: previous event timestamp + 1 second")
+    print("\n  Fix: Insert 'Gained Focus' before each orphaned 'Lost Focus'")
+    print("       Timestamp: previous event timestamp + 1 second")
 
     confirm = input("\n  Apply fix? [y/N]: ").strip().lower()
     if confirm != "y":
@@ -78,8 +78,8 @@ def fix_focus_errors(events, title_name):
 
 def fix_out_of_order(events):
     """Sort events by clockTimestamp."""
-    print(f"\n  Events are not sorted by clockTimestamp")
-    print(f"\n  Fix: Sort all events by clockTimestamp")
+    print("\n  Events are not sorted by clockTimestamp")
+    print("\n  Fix: Sort all events by clockTimestamp")
 
     confirm = input("\n  Apply fix? [y/N]: ").strip().lower()
     if confirm != "y":
@@ -122,13 +122,13 @@ def fix_duplicate_events(events):
         print(f"    ... and {len(duplicates) - 5} more")
 
     if removed == 0:
-        print(f"\n  None are true duplicates: all differ in steadyTimestamp, so they are")
-        print(f"  distinct events (e.g. across a reboot) and none are removed.")
+        print("\n  None are true duplicates: all differ in steadyTimestamp, so they are")
+        print("  distinct events (e.g. across a reboot) and none are removed.")
         return events, False
 
     if removed < len(duplicates):
         print(f"\n  Note: {len(duplicates) - removed} flagged event(s) differ in steadyTimestamp and are")
-        print(f"        distinct events, so they are NOT removed.")
+        print("        distinct events, so they are NOT removed.")
 
     print(f"\n  Fix: Remove the {removed} event(s) that are true duplicates "
           f"(same type, clockTimestamp, steadyTimestamp)")
@@ -169,7 +169,7 @@ def fix_null_fields(events):
     if len(nulls) > 5:
         print(f"    ... and {len(nulls) - 5} more")
 
-    print(f"\n  Fix: Remove events with missing required fields")
+    print("\n  Fix: Remove events with missing required fields")
 
     confirm = input("\n  Apply fix? [y/N]: ").strip().lower()
     if confirm != "y":
@@ -230,7 +230,7 @@ def fix_playtime(summary, events):
 def main():
     if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
         print(f"Usage: {sys.argv[0]} <import.json> [--warnings]")
-        print(f"  --warnings  Also fix warnings (default: errors only)")
+        print("  --warnings  Also fix warnings (default: errors only)")
         sys.exit(2)
 
     import_path = sys.argv[1]
@@ -350,7 +350,7 @@ def main():
             title["summary"] = summary
 
             if title_fixes == 0 and not find_null_fields(events):
-                print(f"    No errors found")
+                print("    No errors found")
 
         print()
 

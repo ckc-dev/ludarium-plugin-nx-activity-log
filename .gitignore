@@ -3,3 +3,7 @@ __pycache__/
 /NX-Activity-Log/
 /import.json
 /importedData.json
+
+.coverage
+.pytest_cache/
+htmlcov/

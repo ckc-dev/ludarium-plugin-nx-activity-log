@@ -28,6 +28,8 @@ Exit code: 0 if all checks pass (warnings OK), 1 if any error is found.
 import sys
 
 from nxal_codec import (
+    GAME_ID_HEX_LENGTH,
+    USER_ID_HEX_LENGTH,
     VALID_EVENT_TYPES,
     VerificationResult,
     calculate_playtime,
@@ -38,8 +40,6 @@ from nxal_codec import (
     is_sorted,
     is_valid_hex,
     load_json,
-    USER_ID_HEX_LENGTH,
-    GAME_ID_HEX_LENGTH,
 )
 
 REASONABLE_TS_MIN = 1483228800  # 2017-01-01 (Switch launch year)
@@ -61,7 +61,7 @@ def validate_metadata(data, result):
         if isinstance(val, str) and len(val) > 0:
             result.ok(f"exportString is non-empty: \"{val}\"")
         else:
-            result.error(f"exportString is empty or not a string")
+            result.error("exportString is empty or not a string")
 
     if "exportTimestamp" in data:
         val = data["exportTimestamp"]
@@ -77,7 +77,7 @@ def validate_metadata(data, result):
         if isinstance(val, str) and len(val) > 0:
             result.ok(f"exportVersion: {val}")
         else:
-            result.error(f"exportVersion is empty or not a string")
+            result.error("exportVersion is empty or not a string")
 
     extra = set(data.keys()) - {"exportString", "exportTimestamp", "exportVersion", "users"}
     for field in sorted(extra):
@@ -243,7 +243,7 @@ def validate_events(prefix, events, summary, result):
         return
 
     # Check for duplicate events (PDM logging artifact, not a real error)
-    for i, first_idx, ev in find_duplicate_events(events):
+    for i, first_idx, _ev in find_duplicate_events(events):
         result.warn(f"{prefix}: duplicate event at index {i} (same as index {first_idx})")
 
     # Events sorted by clockTimestamp

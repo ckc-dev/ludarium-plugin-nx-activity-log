@@ -34,9 +34,9 @@ Each input is backed up as <name>.json.bak, then overwritten with deduplicated d
 Exit code: 0 on success, 1 on error.
 """
 
-import sys
 import os
 import shutil
+import sys
 
 from nxal_codec import (
     calculate_playtime,
@@ -269,8 +269,8 @@ def rebuild_export(data, ownership, export_idx, match_by, renames):
 def main():
     if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
         print(f"Usage: {sys.argv[0]} [--match-by name|id] [--rename OLD=NEW ...] <input1.json> <input2.json> [...]")
-        print(f"  --match-by name|id   Identity for session-key user component (default: name)")
-        print(f"  --rename OLD=NEW     Treat OLD and NEW as the same user name (repeatable)")
+        print("  --match-by name|id   Identity for session-key user component (default: name)")
+        print("  --rename OLD=NEW     Treat OLD and NEW as the same user name (repeatable)")
         sys.exit(2)
 
     args = sys.argv[1:]
@@ -330,7 +330,6 @@ def main():
     ownership = determine_ownership(session_index, len(exports))
 
     # Create backups and rebuild each export
-    results = []
     for export_idx, (path, data) in enumerate(exports):
         backup_path = path + ".bak"
         shutil.copy2(path, backup_path)

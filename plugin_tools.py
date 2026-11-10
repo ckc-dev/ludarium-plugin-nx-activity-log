@@ -1,8 +1,14 @@
 import os
 
-from nxal_codec import (load_json, write_export_json, count_launches,
-                         calculate_playtime, find_duplicate_events,
-                         deduplicate_events, sort_events)
+from nxal_codec import (
+    calculate_playtime,
+    count_launches,
+    deduplicate_events,
+    find_duplicate_events,
+    load_json,
+    sort_events,
+    write_export_json,
+)
 
 
 def _path(params, ctx):

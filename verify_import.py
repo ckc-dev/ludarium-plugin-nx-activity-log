@@ -155,7 +155,7 @@ def verify_users(import_data, imported_data, result):
         else:
             result.ok(f"User '{name}' title count matches: {len(imp_titles)}")
 
-        for i, (imp_title, impd_title) in enumerate(zip(imp_titles, impd_titles)):
+        for i, (imp_title, impd_title) in enumerate(zip(imp_titles, impd_titles, strict=False)):
             verify_title(name, i, imp_title, impd_title, result)
 
     unmatched = len(imported_users) - len(matched_imported_ids)
@@ -211,7 +211,7 @@ def verify_title(user_name, index, imp_title, impd_title, result):
 
     result.ok(f"{prefix}: event count matches ({len(imp_events)})")
 
-    for j, (imp_ev, impd_ev) in enumerate(zip(imp_events, impd_events)):
+    for j, (imp_ev, impd_ev) in enumerate(zip(imp_events, impd_events, strict=False)):
         verify_event(user_name, title_name, j, imp_ev, impd_ev, result)
 
 

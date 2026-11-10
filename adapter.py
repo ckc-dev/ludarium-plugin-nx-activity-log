@@ -42,6 +42,7 @@ from nxal_codec import (
     sort_events,
     write_export_json,
 )
+
 from plugin_sdk import AdapterOperationError
 
 MIN_SESSION_DURATION = 300  # 5 minutes; NXAL ignores shorter focus pairs
@@ -366,7 +367,7 @@ class NXALGameTrackerAdapter:
         data = self._load()
         target = _parse_dt(original_date_time)
         found = False
-        for user_name, t in self._titles(data):
+        for _user_name, t in self._titles(data):
             events = t.setdefault("events", [])
             # find the group starting at target
             group_start = None
@@ -418,7 +419,7 @@ class NXALGameTrackerAdapter:
         hex_id = str(game_id)
         if hex_id.startswith("nx_"):
             hex_id = hex_id[len("nx_"):]
-        for user_name, t in self._titles(data):
+        for _user_name, t in self._titles(data):
             if str(t.get("id", "")).lower() != hex_id.lower():
                 continue
             events = t.setdefault("events", [])
@@ -481,7 +482,7 @@ class NXALGameTrackerAdapter:
         target_ts = _parse_dt(part_id)
         new_ts = _parse_dt(new_start)
         data = self._load()
-        for user_name, t in self._titles(data):
+        for _user_name, t in self._titles(data):
             events = t.setdefault("events", [])
             for ev in events:
                 if ev.get("clockTimestamp") == target_ts:
@@ -504,7 +505,7 @@ class NXALGameTrackerAdapter:
         hex_id = str(game_id)
         if hex_id.startswith("nx_"):
             hex_id = hex_id[len("nx_"):]
-        for user_name, t in self._titles(data):
+        for _user_name, t in self._titles(data):
             if str(t.get("id", "")).lower() != hex_id.lower():
                 continue
             events = t.setdefault("events", [])
@@ -528,7 +529,7 @@ class NXALGameTrackerAdapter:
     def delete_session_part(self, part_id):
         ts = _parse_dt(part_id)
         data = self._load()
-        for user_name, t in self._titles(data):
+        for _user_name, t in self._titles(data):
             events = t.setdefault("events", [])
             for i, ev in enumerate(events):
                 if ev.get("clockTimestamp") == ts:
@@ -546,7 +547,7 @@ class NXALGameTrackerAdapter:
 
     def recalculate_totals(self):
         data = self._load()
-        for user_name, t in self._titles(data):
+        for _user_name, t in self._titles(data):
             self._recompute_title(data, t)
         self._save(data)
         self.report(f"Totals recalculated for '{self.display_name}'")
