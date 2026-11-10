@@ -24,7 +24,6 @@ deduplicate_exports / fix_import / validate_import).
 import json
 import os
 import sys
-import shutil
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -260,7 +259,7 @@ class NXALGameTrackerAdapter:
                 })
                 total += duration
             if not cleared:
-                stored = g.get("stored_duration", 0)
+                stored = t.get("summary", {}).get("playtime", 0)
                 first_ts = t.get("summary", {}).get("firstPlayed", 0) or 0
                 if stored > 0:
                     sessions.append({
@@ -434,7 +433,10 @@ class NXALGameTrackerAdapter:
 
     def get_session_parts(self, game_id, original_date_time):
         data = self._load()
-        target = _parse_dt(original_date_time)
+        try:
+            target = _parse_dt(original_date_time)
+        except (TypeError, ValueError):
+            return []
         parts = []
         hex_id = str(game_id)
         if hex_id.startswith("nx_"):
@@ -654,44 +656,18 @@ class NXALGameTrackerAdapter:
         return None
 
     def get_raw_export(self):
-        """Returns (games, sessions) to match the adapter contract.
-
-        The host unpacks this as a 2-tuple (database.py preview_db_merge and
-        apply_db_merge); returning the raw export dict instead raised
-        ValueError on both paths.
-        """
-        data = self._load()
-        games, sessions = [], []
-        for user_name, t in self._titles(data):
-            game_id = "nx_" + str(t.get("id", ""))
-            games.append({"game_id": game_id, "name": t.get("name", "Unknown")})
-            for group in _title_session_pairs([t]):
-                sessions.append({
-                    "game_id": game_id,
-                    "date_time": format_timestamp(group[0]["clockTimestamp"]),
-                    "duration": calculate_playtime(group),
-                })
-        return games, sessions
+        raise AdapterOperationError(
+            "NXAL does not support raw export: users and event detail "
+            "cannot be reconstructed losslessly from the session view.")
 
     def import_raw_data(self, games, sessions):
-        for g in games:
-            self.add_game(g["game_id"], g["name"])
-        for s in sessions:
-            self.add_session(s["game_id"], s["date_time"], round(s["duration"]))
+        raise AdapterOperationError(
+            "NXAL does not support raw import: sessions must be written as "
+            "event groups, not reconstructed rows.")
 
     def backup_and_disable(self):
-        import time
-        data = self._load()
-        stamp = time.strftime("%Y%m%d%H%M%S")
-        backup = f"{self.path}.backup_{stamp}"
-        shutil.copy2(self.path, backup)
-        # disable by replacing with minimal empty export
-        write_export_json(self.path, {
-            "users": [], "version": 1,
-            "generatedAt": data.get("generatedAt", 0),
-        })
-        self._invalidate_cache()
-        self.report(f"Backed up to {backup} and disabled '{self.display_name}'")
+        raise AdapterOperationError(
+            "NXAL does not support database merge backup/disable.")
 
     # ---------- helpers for advanced ops (called by plugin_tools) ----------
     def _merge_titles(self, primary_id, duplicate_ids):
