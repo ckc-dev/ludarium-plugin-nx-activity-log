@@ -28,6 +28,11 @@ title and event type as well as timestamp; required boundary/account events
 are read-only. A session without a `Closed` event is marked incomplete in the
 host; its **Fix** action adds the missing account-logout/closed events.
 
+Exact duplicate native event groups are marked **Duplicate session** by the
+adapter. The host can show both as overlapping, but overlap is only a warning;
+the duplicate warning is exact. Its **Fix** action removes all but one copy of
+the identical group.
+
 Session part **Add play segment** adds credited focus time in a gap. It does
 not insert a pause: edit the surrounding focus events for pause changes.
 New games are written with a zero-valued summary so NXAL's importer keeps

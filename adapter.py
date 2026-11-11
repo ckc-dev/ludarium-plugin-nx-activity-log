@@ -73,6 +73,28 @@ def _group_active_segments(group):
     ]
 
 
+def _group_fingerprint(group):
+    """Exact native event identity, used to detect duplicate groups."""
+    return tuple(
+        (event.get("type"), event.get("clockTimestamp"),
+         event.get("steadyTimestamp"))
+        for event in group
+    )
+
+
+def _warning_text(incomplete, duplicate):
+    parts = []
+    if incomplete:
+        parts.append(
+            "Incomplete session: NXAL has no Closed event. Use Fix to close it.")
+    if duplicate:
+        parts.append(
+            "Duplicate session: another session has the same native event "
+            "group. Use Fix to remove the duplicate.")
+    return " ".join(parts)
+
+
+
 PROTECTED_PART_TYPES = frozenset({
     "Launched", "Closed", "Account Login", "Account Logout",
 })
@@ -361,6 +383,7 @@ class NXALGameTrackerAdapter:
         data = self._load()
         games_list = self._game_entries(data)
         sessions, total = [], 0
+        seen_groups = {}
         for user_name, t in self._titles(data):
             game_id = "nx_" + str(t["id"])
             cleared = False
@@ -370,6 +393,10 @@ class NXALGameTrackerAdapter:
                 end_ts = _group_end_clock(group) or start_ts
                 incomplete = not any(
                     event.get("type") == "Closed" for event in group)
+                group_key = (
+                    user_name, str(t.get("id", "")), _group_fingerprint(group))
+                duplicate_index = seen_groups.get(group_key)
+                duplicate = duplicate_index is not None
                 cleared = True
                 sessions.append({
                     "game_id": game_id,
@@ -380,11 +407,18 @@ class NXALGameTrackerAdapter:
                     "end_time": format_timestamp(end_ts),
                     "active_segments": _group_active_segments(group),
                     "duration": duration,
-                    "session_warning": (
-                        "Incomplete session: NXAL has no Closed event. "
-                        "Use Fix to close it." if incomplete else ""),
-                    "repair_available": incomplete,
+                    "session_warning": _warning_text(incomplete, duplicate),
+                    "repair_available": incomplete or duplicate,
                 })
+                current_index = len(sessions) - 1
+                if duplicate_index is None:
+                    seen_groups[group_key] = current_index
+                else:
+                    first = sessions[duplicate_index]
+                    first["session_warning"] = _warning_text(
+                        "Incomplete session:" in first["session_warning"],
+                        True)
+                    first["repair_available"] = True
                 total += duration
             if not cleared:
                 summary = t.get("summary", {})
@@ -739,6 +773,25 @@ class NXALGameTrackerAdapter:
     # event stream. No phantom, no drift: a pause is never an entity — it is
     # the duration a Lost Focus part owns until the next Gained Focus.
 
+    def _remove_duplicate_groups(self, data, title, target_group):
+        """Remove exact duplicate groups, keeping the target group."""
+        fingerprint = _group_fingerprint(target_group)
+        matches = [
+            group for group in _title_session_pairs([title])
+            if _group_fingerprint(group) == fingerprint
+        ]
+        if len(matches) < 2:
+            return False
+        events = title.setdefault("events", [])
+        target_first = target_group[0]
+        for group in matches:
+            if group and group[0] is target_first:
+                continue
+            start = self._group_start_index(events, group)
+            del events[start:start + len(group)]
+        self._recompute_title(data, title)
+        return True
+
     def repair_incomplete_session(self, game_id, date_time,
                                   session_id=None):
         """Close an incomplete group and add missing account attribution."""
@@ -781,7 +834,10 @@ class NXALGameTrackerAdapter:
                    ("Launched", "Closed")):
                 group_end += 1
             group = events[group_start:group_end]
+        duplicate_removed = self._remove_duplicate_groups(data, title, group)
         if any(event.get("type") == "Closed" for event in group):
+            if duplicate_removed:
+                self._save(data)
             return
         next_clock = (events[group_end].get("clockTimestamp")
                       if group_end < len(events) else None)

@@ -294,6 +294,24 @@ class NxalSessionTest(unittest.TestCase):
         self.assertEqual(event_types[-2:], ['Account Logout', 'Closed'])
 
 
+    def test_exact_duplicate_sessions_warn_and_repair(self):
+        path, adapter = self._adapter(
+            _payload(_complete_events() + _complete_events()))
+        rows = adapter.fetch_dashboard_data()[1]
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(row['repair_available'] for row in rows))
+        self.assertTrue(all('Duplicate session' in row['session_warning']
+                            for row in rows))
+        self.assertEqual(rows[0]['session_id'], rows[1]['session_id'])
+        adapter.repair_incomplete_session(
+            rows[0]['game_id'], rows[0]['date_time'],
+            session_id=rows[0]['session_id'])
+        repaired = adapter.fetch_dashboard_data()[1]
+        self.assertEqual(len(repaired), 1)
+        self.assertFalse(repaired[0]['repair_available'])
+        self.assertEqual(repaired[0]['session_warning'], '')
+
+
 
 if __name__ == '__main__':
     unittest.main()
