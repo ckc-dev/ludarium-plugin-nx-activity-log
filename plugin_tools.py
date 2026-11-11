@@ -1,6 +1,13 @@
+"""Environment-scoped host tools for NXAL exports."""
+
+import io
 import os
+import shutil
+from contextlib import redirect_stdout
 
 from nxal_codec import (
+    VALID_EVENT_TYPES,
+    VerificationResult,
     calculate_playtime,
     count_launches,
     deduplicate_events,
@@ -12,104 +19,372 @@ from nxal_codec import (
     write_export_json,
 )
 
+from . import deduplicate_exports, merge_exports, validate_import, verify_import
+
+EVENT_IDENTITY_KEY = ('type', 'clockTimestamp', 'steadyTimestamp')
+
 
 def _path(params, ctx):
-    path = (params.get("path") or "").strip()
+    path = (params.get('path') or '').strip()
     if not path:
-        path = (ctx.path or "").strip()
+        path = (ctx.path or '').strip()
     if not path:
-        return None, ("Provide a path to an NXAL import.json or select an "
-                      "environment above.")
+        return None, ("Select an NXAL environment or provide a path to an "
+                      "NXAL import.json.")
     if not os.path.isfile(path):
         return None, f"File not found: {path}"
     return path, None
 
 
+def _lines(result):
+    lines = []
+    lines.extend(f"ERROR: {message}" for message in result.errors)
+    lines.extend(f"WARN: {message}" for message in result.warnings)
+    if not lines:
+        lines.append("No errors or warnings.")
+    lines.append(
+        f"RESULT: {len(result.errors)} error(s), "
+        f"{len(result.warnings)} warning(s)")
+    return lines
+
+
+def _load_for_tool(params, ctx):
+    path, error = _path(params, ctx)
+    if error:
+        return None, None, error
+    try:
+        return path, load_json(path), None
+    except Exception as error:
+        return None, None, f"Could not read {path}: {error}"
+
+
 def verify_export(params, ctx):
-    path, err = _path(params, ctx)
-    if err:
-        return {"ok": False, "message": err, "lines": []}
-    try:
-        data = load_json(path)
-    except Exception as e:
-        return {"ok": False, "message": f"Could not read file: {e}", "lines": []}
-    users = data.get("users", [])
-    titles = sum(len(u.get("titles", [])) for u in users)
-    launches = sum(count_launches(t.get("events", []))
-                   for u in users for t in u.get("titles", []))
-    minutes = sum(calculate_playtime(t.get("events", []))
-                  for u in users for t in u.get("titles", [])) / 60.0
-    dupes = sum(len(find_duplicate_events(t.get("events", [])))
-                for u in users for t in u.get("titles", []))
-    lines = [f"File: {path}", f"Users: {len(users)}", f"Titles: {titles}",
-             f"Launches: {launches}", f"Playtime: {minutes:.1f} min"]
-    if dupes:
-        lines.append(f"WARN: {dupes} duplicate event(s) present")
-    return {"ok": True, "message": "Export verified", "lines": lines}
+    """Quick read-only export summary (not the full validator)."""
+    path, data, error = _load_for_tool(params, ctx)
+    if error:
+        return {'ok': False, 'message': error, 'lines': []}
+    users = data.get('users', [])
+    titles = sum(len(user.get('titles', [])) for user in users)
+    launches = sum(
+        count_launches(title.get('events', []))
+        for user in users for title in user.get('titles', []))
+    minutes = sum(
+        calculate_playtime(title.get('events', []))
+        for user in users for title in user.get('titles', [])) / 60.0
+    duplicate_events = sum(
+        len(find_duplicate_events(title.get('events', [])))
+        for user in users for title in user.get('titles', []))
+    lines = [
+        f"File: {path}",
+        f"Users: {len(users)}",
+        f"Titles: {titles}",
+        f"Launches: {launches}",
+        f"Playtime: {minutes:.1f} min",
+    ]
+    if duplicate_events:
+        lines.append(f"WARN: {duplicate_events} duplicate event(s) present")
+    lines.append(f"RESULT: {len(users)} user(s), {titles} title(s)")
+    return {'ok': True, 'message': 'Export summary', 'lines': lines}
 
 
-def fix_import(params, ctx):
-    path, err = _path(params, ctx)
-    if err:
-        return {"ok": False, "message": err, "lines": []}
+def validate_export(params, ctx):
+    """Run the full NXAL structural/data validator."""
+    path, data, error = _load_for_tool(params, ctx)
+    if error:
+        return {'ok': False, 'message': error, 'lines': []}
+    result = VerificationResult()
+    with redirect_stdout(io.StringIO()):
+        validate_import.validate_metadata(data, result)
+        validate_import.validate_users(data, result)
+    return {
+        'ok': result.passed,
+        'message': 'Export is valid' if result.passed else 'Export has errors',
+        'lines': _lines(result),
+    }
+
+
+def verify_imported_data(params, ctx):
+    """Compare the selected import.json with its sibling importedData.json."""
+    path, _data, error = _load_for_tool(params, ctx)
+    if error:
+        return {'ok': False, 'message': error, 'lines': []}
+    imported_path = os.path.join(
+        os.path.dirname(path), 'importedData.json')
+    if not os.path.isfile(imported_path):
+        return {
+            'ok': False,
+            'message': f"importedData.json not found beside {path}",
+            'lines': [],
+        }
     try:
-        data = load_json(path)
-    except Exception as e:
-        return {"ok": False, "message": f"Could not read file: {e}", "lines": []}
-    removed_events = 0
-    for u in data.get("users", []):
-        for t in u.get("titles", []):
-            evs = deduplicate_events(
-                t.get("events", []),
-                ("type", "clockTimestamp", "steadyTimestamp"))
-            before = len(t.get("events", []))
-            evs = sort_events(evs)
-            removed_events += before - len(evs)
-            orphaned = set(find_orphaned_lost_focus(evs))
-            if orphaned:
-                evs = [
-                    event for index, event in enumerate(evs)
-                    if index not in orphaned
-                ]
-                removed_events += len(orphaned)
-            t["events"] = evs
-            if not evs:
-                continue
-            summary = t.setdefault("summary", {})
-            first, last = first_last_from_events(
-                evs, summary.get("firstPlayed", 0),
-                summary.get("lastPlayed", 0))
-            # NXAL's firstPlayed/lastPlayed come from PDM, not events.
-            # Preserve existing non-zero values; fill only a missing pair.
-            if not summary.get("firstPlayed"):
-                summary["firstPlayed"] = first
-            if not summary.get("lastPlayed"):
-                summary["lastPlayed"] = last
-            summary["playtime"] = calculate_playtime(evs)
-            summary["launches"] = count_launches(evs)
+        imported_data = load_json(imported_path)
+    except Exception as read_error:
+        return {
+            'ok': False,
+            'message': f"Could not read {imported_path}: {read_error}",
+            'lines': [],
+        }
+    result = VerificationResult()
+    with redirect_stdout(io.StringIO()):
+        verify_import.verify_metadata(_data, imported_data, result)
+        verify_import.verify_users(_data, imported_data, result)
+    return {
+        'ok': result.passed,
+        'message': ('Import matches its generated data' if result.passed
+                    else 'Import verification found errors'),
+        'lines': _lines(result),
+    }
+
+
+def _repair_events(events):
+    """Remove invalid/duplicate/orphan events and return (events, count)."""
+    removed = 0
+    cleaned = []
+    for event in events:
+        if (event.get('type') not in VALID_EVENT_TYPES
+                or not isinstance(event.get('clockTimestamp'), int)
+                or not isinstance(event.get('steadyTimestamp'), int)):
+            removed += 1
+            continue
+        cleaned.append(event)
+
+    before = len(cleaned)
+    cleaned = deduplicate_events(cleaned, EVENT_IDENTITY_KEY)
+    removed += before - len(cleaned)
+
+    # Sort before detecting orphan focus: a deliberately out-of-order file
+    # must not make a valid Gained/Lost pair look orphaned.
+    cleaned = sort_events(cleaned)
+    orphaned = set(find_orphaned_lost_focus(cleaned))
+    if orphaned:
+        cleaned = [
+            event for index, event in enumerate(cleaned)
+            if index not in orphaned
+        ]
+        removed += len(orphaned)
+    return cleaned, removed
+
+
+def fix_export(params, ctx):
+    """Repair the selected export in place, with a .bak backup.
+
+    This is deliberately a tool action, not an adapter read/edit action:
+    it sorts events, removes invalid/duplicate/orphan events, and recomputes
+    the summary first/last timestamps/playtime/launches.
+    """
+    path, data, error = _load_for_tool(params, ctx)
+    if error:
+        return {'ok': False, 'message': error, 'lines': []}
+    try:
+        shutil.copy2(path, path + '.bak')
+    except OSError as backup_error:
+        return {
+            'ok': False,
+            'message': f"Could not create backup: {backup_error}",
+            'lines': [],
+        }
+
+    removed = 0
+    changed_titles = 0
+    users = data.get('users', [])
+    for user in users:
+        for title in user.get('titles', []):
+            events, title_removed = _repair_events(
+                title.get('events', []))
+            removed += title_removed
+            title['events'] = events
+            first, last = first_last_from_events(events, 0, 0)
+            summary = title.setdefault('summary', {})
+            summary['firstPlayed'] = first
+            summary['lastPlayed'] = last
+            summary['playtime'] = calculate_playtime(events)
+            summary['launches'] = count_launches(events)
+            changed_titles += 1
     write_export_json(path, data)
-    return {"ok": True,
-            "message": f"Rewrote {path} (removed {removed_events} event(s))",
-            "lines": []}
+    return {
+        'ok': True,
+        'message': f"Repaired {path}",
+        'lines': [
+            f"Backup: {path}.bak",
+            f"Titles updated: {changed_titles}",
+            f"Events removed: {removed}",
+            'Events sorted and summary timestamps repaired.',
+        ],
+    }
 
+
+# Backwards-compatible name used by existing tests and older tool configs.
+def fix_import(params, ctx):
+    return fix_export(params, ctx)
+
+
+def _renames(value):
+    result = {}
+    for line in str(value or '').replace(',', '\n').splitlines():
+        if '=' not in line:
+            continue
+        old, new = line.split('=', 1)
+        old, new = old.strip(), new.strip()
+        if old and new:
+            result[old] = new
+    return result
+
+
+def _selected_paths(params, ctx):
+    path, error = _path(params, ctx)
+    if error:
+        return [], error
+    paths = [path]
+    for source in params.get('sources') or []:
+        if source and source not in paths:
+            paths.append(source)
+    return paths, None
+
+
+def merge_export(params, ctx):
+    """Merge all selected environments into the selected target in place."""
+    paths, error = _selected_paths(params, ctx)
+    if error:
+        return {'ok': False, 'message': error, 'lines': []}
+    if len(paths) < 2:
+        return {
+            'ok': False,
+            'message': 'Select at least one additional source environment.',
+            'lines': [],
+        }
+    try:
+        stats = merge_exports.merge_paths(
+            paths[0], paths, backup=True)
+    except Exception as merge_error:
+        return {'ok': False, 'message': str(merge_error), 'lines': []}
+    return {
+        'ok': True,
+        'message': f"Merged into {paths[0]}",
+        'lines': [
+            f"Target: {stats['path']}",
+            f"Backup: {stats['backup'] or '(none)'}",
+            f"Users: {stats['users']}",
+            f"Titles: {stats['titles']}",
+            f"Events: {stats['events']}",
+        ],
+    }
+
+
+def deduplicate_export(params, ctx):
+    """Deduplicate all selected environments in place."""
+    paths, error = _selected_paths(params, ctx)
+    if error:
+        return {'ok': False, 'message': error, 'lines': []}
+    if len(paths) < 2:
+        return {
+            'ok': False,
+            'message': 'Select at least one additional source environment.',
+            'lines': [],
+        }
+    match_by = params.get('match_by') or 'name'
+    try:
+        results = deduplicate_exports.deduplicate_paths(
+            paths, match_by=match_by,
+            renames=_renames(params.get('renames')), backup=True)
+    except Exception as dedup_error:
+        return {'ok': False, 'message': str(dedup_error), 'lines': []}
+    lines = []
+    for stats in results:
+        lines.extend([
+            f"File: {stats['path']}",
+            f"Backup: {stats['backup'] or '(none)'}",
+            f"Sessions: {stats['sessions_after']}/"
+            f"{stats['sessions_before']}",
+            f"Events: {stats['events_after']}/{stats['events_before']}",
+            f"Titles: {stats['titles_after']}",
+        ])
+    return {
+        'ok': True,
+        'message': 'Deduplication complete',
+        'lines': lines,
+    }
+
+
+_SOURCE_FIELD = {
+    'name': 'sources',
+    'label': 'Additional source environments',
+    'type': 'environment',
+    'multiple': True,
+    'required': True,
+    'help': 'The selected environment is the target; select one or more '
+            'additional NXAL environments.',
+}
 
 PLUGIN_TOOLS = [
-    {"key": "verify_export", "name": "Verify export",
-     "description": "Validate users/titles/launches/playtime in an NXAL export.",
-     "needs_environment": True,
-     "fields": [
-         {"name": "path", "label": "Export path", "type": "path",
-          "required": False,
-          "help": "Leave empty to use the selected environment path."},
-     ],
-     "execute": verify_export},
-    {"key": "fix_import", "name": "Fix export",
-     "description": "Deduplicate + sort events, write back byte-compatibly.",
-     "needs_environment": True,
-     "fields": [
-         {"name": "path", "label": "Export path", "type": "path",
-          "required": False,
-          "help": "Leave empty to use the selected environment path."},
-     ],
-     "execute": fix_import},
+    {
+        'key': 'validate_export',
+        'name': 'Validate export',
+        'description': 'Run the full NXAL structural/data validator in place.',
+        'needs_environment': True,
+        'fields': [],
+        'execute': validate_export,
+    },
+    {
+        'key': 'verify_import',
+        'name': 'Verify imported data',
+        'description': 'Compare the selected import.json with its sibling '
+                       'importedData.json.',
+        'needs_environment': True,
+        'fields': [],
+        'execute': verify_imported_data,
+    },
+    {
+        'key': 'fix_import',
+        'name': 'Fix export in place',
+        'description': 'Back up, sort, repair malformed/duplicate events, and '
+                       'fix summary first/last/playtime/launches.',
+        'needs_environment': True,
+        'fields': [],
+        'execute': fix_export,
+    },
+    {
+        'key': 'merge_exports',
+        'name': 'Merge exports in place',
+        'description': 'Merge selected source environments into the selected '
+                       'target, with a backup.',
+        'needs_environment': True,
+        'fields': [_SOURCE_FIELD],
+        'execute': merge_export,
+    },
+    {
+        'key': 'deduplicate_exports',
+        'name': 'Deduplicate exports in place',
+        'description': 'Remove overlapping sessions across the selected '
+                       'environments, with backups.',
+        'needs_environment': True,
+        'fields': [
+            _SOURCE_FIELD,
+            {
+                'name': 'match_by',
+                'label': 'Match users by',
+                'type': 'select',
+                'options': [
+                    {'value': 'name', 'label': 'Profile name'},
+                    {'value': 'id', 'label': 'Native user id'},
+                ],
+                'default': 'name',
+            },
+            {
+                'name': 'renames',
+                'label': 'Rename matches',
+                'type': 'text',
+                'placeholder': 'OldName=NewName, Other=Name',
+                'help': 'Optional; only used with name matching.',
+            },
+        ],
+        'execute': deduplicate_export,
+    },
+    {
+        'key': 'verify_export',
+        'name': 'Export summary',
+        'description': 'Quick read-only user/title/launch/playtime summary.',
+        'needs_environment': True,
+        'fields': [],
+        'execute': verify_export,
+    },
 ]

@@ -646,7 +646,7 @@ class NxalSessionTest(unittest.TestCase):
         self.assertEqual(title['summary']['playtime'], 100)
         self.assertEqual(title['summary']['launches'], 1)
 
-    def test_fix_export_removes_orphan_focus_and_preserves_summary_pair(self):
+    def test_fix_export_removes_orphan_focus_and_fixes_summary_pair(self):
         start = int(datetime(2026, 1, 15, 10, 0, 0).timestamp())
         events = [
             {'type': 'Launched', 'clockTimestamp': start,
@@ -676,9 +676,11 @@ class NxalSessionTest(unittest.TestCase):
         title = nxal_codec.load_json(path)['users'][0]['titles'][0]
         self.assertEqual(
             nxal_codec.find_orphaned_lost_focus(title['events']), [])
-        self.assertEqual(title['summary']['firstPlayed'], 111)
-        self.assertEqual(title['summary']['lastPlayed'], 222)
+        # Tool repairs use event-derived first/last semantics.
+        self.assertEqual(title['summary']['firstPlayed'], start + 3)
+        self.assertEqual(title['summary']['lastPlayed'], start + 12)
         self.assertEqual(title['summary']['playtime'], 10)
+        self.assertTrue(os.path.exists(path + '.bak'))
 
     def test_game_merge_candidates_are_scoped_to_one_user(self):
         path, adapter = self._adapter()

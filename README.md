@@ -49,6 +49,24 @@ adapter. The host can show both as overlapping, but overlap is only a warning;
 the duplicate warning is exact. Its **Fix** action removes all but one copy of
 the identical group.
 
+## Host tools
+
+The Tools page exposes environment-scoped equivalents of the CLI scripts:
+
+- Validate export
+- Verify imported data (`import.json` against sibling `importedData.json`)
+- Fix export in place
+- Merge exports in place
+- Deduplicate exports in place
+- Export summary
+
+Tools use the selected NXAL environment path; there are no free-form path
+inputs. Fix/merge/deduplicate write in place and create `.bak` backups first.
+Fix sorts events and repairs summary first/last/playtime/launches. Merge and
+deduplicate intentionally recompute summary values from the resulting event
+stream. Multi-environment tools use the selected environment as their target
+and additional source environments from the environment selector.
+
 **Add play segment** adds credited focus time in an inactive gap. Pauses are
 the gaps between play segments, so moving or deleting a segment changes the
 pause without a separate pause editor. New games are written with a
