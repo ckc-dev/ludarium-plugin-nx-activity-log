@@ -54,6 +54,7 @@ class TestNxalCapabilities(unittest.TestCase):
             _nxal_fixture(path)
             adapter = NXALGameTrackerAdapter('nxal', 'NXAL', path, 1)
             self.assertTrue(adapter.supports_session_write)
+            self.assertTrue(adapter.supports_session_repair)
             self.assertTrue(adapter.supports_game_write)
             self.assertTrue(adapter.supports_game_merge)
             self.assertFalse(adapter.supports_raw_transfer)

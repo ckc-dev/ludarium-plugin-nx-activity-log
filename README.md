@@ -25,7 +25,13 @@ Charts and calendar views clip the active segments to their selected range.
 Synthesized sessions include `Account Login` and `Account Logout` events,
 which NXAL uses to attribute a session to a user. Session parts are keyed by
 title and event type as well as timestamp; required boundary/account events
-are read-only.
+are read-only. A session without a `Closed` event is marked incomplete in the
+host; its **Fix** action adds the missing account-logout/closed events.
+
+Session part **Add play segment** adds credited focus time in a gap. It does
+not insert a pause: edit the surrounding focus events for pause changes.
+New games are written with a zero-valued summary so NXAL's importer keeps
+them even before their first session.
 
 ## Acknowledgements
 

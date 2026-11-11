@@ -175,6 +175,77 @@ class NxalSessionTest(unittest.TestCase):
             [candidates[0]['instances'][1]['game_id']])
         self.assertEqual(len(adapter._load()['users'][0]['titles']), 1)
 
+    def test_add_game_writes_a_durable_zero_summary(self):
+        path, adapter = self._adapter()
+        adapter.add_game('nx_' + 'D' * 16, 'New Game')
+        title = next(
+            item for item in adapter._load()['users'][0]['titles']
+            if item['id'] == 'D' * 16)
+        self.assertEqual(title['summary'], {
+            'firstPlayed': 0, 'lastPlayed': 0, 'playtime': 0, 'launches': 0,
+        })
+
+    def test_incomplete_session_warns_and_repairs_with_one_call(self):
+        start = int(datetime(2026, 1, 3, 12, 0, 0).timestamp())
+        events = [
+            {'type': 'Launched', 'clockTimestamp': start,
+             'steadyTimestamp': 500},
+            {'type': 'Gained Focus', 'clockTimestamp': start + 2,
+             'steadyTimestamp': 502},
+            {'type': 'Account Login', 'clockTimestamp': start + 3,
+             'steadyTimestamp': 503},
+            {'type': 'Lost Focus', 'clockTimestamp': start + 62,
+             'steadyTimestamp': 562},
+        ]
+        path, adapter = self._adapter(_payload(events))
+        row = adapter.fetch_dashboard_data()[1][0]
+        self.assertTrue(row['repair_available'])
+        self.assertIn('Incomplete', row['session_warning'])
+        adapter.repair_incomplete_session(
+            'nx_' + TITLE_ID, row['date_time'])
+        repaired = adapter.fetch_dashboard_data()[1][0]
+        self.assertFalse(repaired['repair_available'])
+        self.assertEqual(repaired['session_warning'], '')
+        types = [event['type'] for event in
+                 adapter._load()['users'][0]['titles'][0]['events']]
+        self.assertIn('Account Logout', types)
+        self.assertIn('Closed', types)
+
+    def test_update_session_preserves_existing_focus_and_account_events(self):
+        start = int(datetime(2026, 1, 4, 10, 0, 0).timestamp())
+        events = [
+            {'type': 'Launched', 'clockTimestamp': start,
+             'steadyTimestamp': 100},
+            {'type': 'Gained Focus', 'clockTimestamp': start + 2,
+             'steadyTimestamp': 102},
+            {'type': 'Account Login', 'clockTimestamp': start + 3,
+             'steadyTimestamp': 103},
+            {'type': 'Lost Focus', 'clockTimestamp': start + 52,
+             'steadyTimestamp': 152},
+            {'type': 'Gained Focus', 'clockTimestamp': start + 55,
+             'steadyTimestamp': 155},
+            {'type': 'Lost Focus', 'clockTimestamp': start + 75,
+             'steadyTimestamp': 175},
+            {'type': 'Account Logout', 'clockTimestamp': start + 76,
+             'steadyTimestamp': 176},
+            {'type': 'Closed', 'clockTimestamp': start + 78,
+             'steadyTimestamp': 178},
+        ]
+        path, adapter = self._adapter(_payload(events))
+        before = adapter._load()['users'][0]['titles'][0]['events']
+        adapter.update_session(
+            'nx_' + TITLE_ID, 150, datetime.fromtimestamp(
+                start).strftime('%Y-%m-%d %H:%M:%S'),
+            datetime.fromtimestamp(start).strftime('%Y-%m-%d %H:%M:%S'))
+        after = adapter._load()['users'][0]['titles'][0]['events']
+        self.assertEqual([event['type'] for event in after],
+                         [event['type'] for event in before])
+        self.assertEqual(adapter.fetch_dashboard_data()[1][0]['duration'], 150)
+        self.assertEqual(
+            sum(1 for event in after if event['type'] == 'Gained Focus'), 2)
+        self.assertIn('Account Logout', [event['type'] for event in after])
+
+
 
 if __name__ == '__main__':
     unittest.main()
