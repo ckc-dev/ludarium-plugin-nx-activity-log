@@ -364,7 +364,7 @@ def main():
                         changed = True
                         continue
 
-                if FIX_WARNINGS and FIX_FIRST_LAST:
+                if FIX_FIRST_LAST:
                     summary, fixed_first_last = fix_first_last(summary, events)
                     if fixed_first_last:
                         title_fixes += 1
