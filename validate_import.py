@@ -269,10 +269,10 @@ def validate_events(prefix, events, summary, result):
     # event-derived proxy and may legitimately differ.
     fp = summary.get("firstPlayed") if summary else None
     if fp is not None:
-        first_login = next(
+        first_login = min(
             (ev["clockTimestamp"] for ev in events
              if ev.get("type") == "Account Login"),
-            None,
+            default=None,
         )
         if first_login is not None:
             if fp == first_login:
@@ -290,10 +290,10 @@ def validate_events(prefix, events, summary, result):
     # We warn on mismatches since they're expected in some cases.
     lp = summary.get("lastPlayed") if summary else None
     if lp is not None:
-        last_focus = next(
-            (ev["clockTimestamp"] for ev in reversed(events)
+        last_focus = max(
+            (ev["clockTimestamp"] for ev in events
              if ev.get("type") == "Lost Focus"),
-            None,
+            default=None,
         )
         if last_focus is not None:
             if lp == last_focus:
