@@ -697,6 +697,9 @@ class NXALGameTrackerAdapter:
             game_id = "nx_" + str(t["id"])
             cleared = False
             for group in _title_session_pairs([t]):
+                # Host table/edit accounting (Option A): show active play
+                # segments, not NXAL's summary countPlaytime() value. Exported
+                # summaries use the NXAL-compatible calculation separately.
                 duration = calculate_playtime(group)
                 start_ts = group[0].get("clockTimestamp")
                 if not isinstance(start_ts, int):

@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from unittest import mock
 
 from plugin_sdk import AdapterOperationError, SessionMerge, SessionRef
-from plugins.nx_activity_log import nxal_codec, plugin_tools
+from plugins.nx_activity_log import nxal_codec, nxal_repair, plugin_tools
 from plugins.nx_activity_log.adapter import NXALGameTrackerAdapter
 
 START = 1767225600
@@ -59,6 +59,31 @@ class NxalSessionTest(unittest.TestCase):
             _complete_events()))
         self.addCleanup(tmp.cleanup)
         return path, NXALGameTrackerAdapter('nxal', 'NXAL', path, 1)
+
+
+    def test_host_uses_active_play_while_summary_uses_nxal_accounting(self):
+        events = [
+            {'type': 'Launched', 'clockTimestamp': START,
+             'steadyTimestamp': 100},
+            {'type': 'Gained Focus', 'clockTimestamp': START + 2,
+             'steadyTimestamp': 102},
+            {'type': 'Account Login', 'clockTimestamp': START + 3,
+             'steadyTimestamp': 103},
+            {'type': 'Lost Focus', 'clockTimestamp': START + 32,
+             'steadyTimestamp': 132},
+            {'type': 'Account Logout', 'clockTimestamp': START + 33,
+             'steadyTimestamp': 133},
+            {'type': 'Lost Focus', 'clockTimestamp': START + 34,
+             'steadyTimestamp': 134},
+            {'type': 'Closed', 'clockTimestamp': START + 35,
+             'steadyTimestamp': 135},
+        ]
+        path, adapter = self._adapter(_payload(events))
+        row = adapter.fetch_dashboard_data()[1][0]
+        self.assertEqual(row['duration'], 30)
+        self.assertEqual(
+            nxal_repair.summary_for_events(events)['playtime'], 62)
+
 
     def test_playtime_uses_steady_time_when_clock_jumps(self):
         events = [

@@ -114,9 +114,11 @@ def focus_intervals(events):
 def calculate_playtime(events):
     """Calculate credited playtime from completed Gained/Lost Focus pairs.
 
-    This is the host-side active-play accounting used for logical session
-    segments. It intentionally ignores account-separated orphan Lost Focus
-    events; see calculate_nxal_playtime() for NXAL's export accounting.
+    This is the chosen host-side accounting for session rows, edit forms and
+    active-play totals. It intentionally ignores account-separated orphan Lost
+    Focus events because the host presents editable logical play segments, and
+    a duration must equal the sum of those segments. Export/summary fields use
+    calculate_nxal_playtime() instead so they remain NXAL-compatible.
     """
     return sum(duration for _start, duration in focus_intervals(events))
 

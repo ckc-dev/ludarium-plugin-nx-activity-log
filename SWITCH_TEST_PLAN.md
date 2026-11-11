@@ -44,6 +44,8 @@ Expected:
 - At least one complete `Launched…Closed` group.
 - No PDM/imported-data assumptions.
 - Host reads the same user and session count.
+- Host session durations/total use active-play segments; summary/export values
+  use NXAL-compatible accounting and may differ for malformed orphan focus.
 
 Record:
 

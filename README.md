@@ -101,11 +101,25 @@ across profile renames.
 adapter edits, because NXAL takes them from the console PDM database rather
 than deriving them from the event stream. Repair tools preserve valid PDM
 values by default and offer an explicit event-derived recalculation option.
-Summary playtime and launches use NXAL `countPlaytime()` accounting: launches
-are session-based and only account-bearing sessions count. Accountless groups
-are reported explicitly by the adapter and can be repaired or merged with an
-account-bearing copy. Merge/deduplicate normalize event groups and reject
-structurally malformed inputs rather than partially rewriting them.
+### Accounting model
+
+Host session rows, active segments and the session-table total use **active
+play accounting** (`nxal_codec.calculate_playtime()`): the sum of completed
+focus intervals. This is intentional because users edit logical play segments;
+the displayed session duration must equal the sum of those editable segments,
+and an account-separated orphan focus must not be double-counted.
+
+Exported/imported **summary fields** use NXAL-compatible
+`countPlaytime()` accounting (`nxal_codec.calculate_nxal_playtime()`). Launch
+counts are session-based and only account-bearing sessions count. As a result,
+a malformed orphan-focus session can show a different active-play duration in
+the host than its NXAL summary value. That difference is deliberate and is the
+condition the warning/Fix path reports.
+
+Accountless groups are reported explicitly by the adapter and can be repaired
+or merged with an account-bearing copy. Merge/deduplicate normalize event
+groups and reject structurally malformed inputs rather than partially
+rewriting them.
 
 ## Acknowledgements
 
