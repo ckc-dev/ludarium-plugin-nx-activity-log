@@ -144,7 +144,9 @@ def _session_id(user_name, title, group):
     part edits and incomplete-session repair. Including the NXAL profile and
     title id separates sessions that start in the same second in different
     games or profiles. Two completely identical Launched events in one title
-    remain inherently indistinguishable without a persistent native id.
+    remain inherently indistinguishable without a persistent native id, and
+    two different groups sharing that start identity also collide because the
+    id is anchored to the start rather than the full event body.
     """
     launched = group[0] if group else {}
     parts = [

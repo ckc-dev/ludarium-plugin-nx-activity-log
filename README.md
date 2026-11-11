@@ -44,7 +44,11 @@ across duration/part edits and incomplete-session repair; moving the start
 creates a new id and the host migrates the user override. Exact ids also let
 two sessions starting in the same second be edited or deleted independently.
 Two completely identical `Launched` events in one title remain inherently
-indistinguishable without a persistent native field.
+indistinguishable without a persistent native field. The residual collision
+case is two different event groups in one title/profile with the same
+`Launched` clock/steady identity but different later events: they share the
+synthetic id and are not auto-detected as duplicates. Manual event cleanup or
+a persistent native id is required for that case.
 
 ## Acknowledgements
 
