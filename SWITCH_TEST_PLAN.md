@@ -141,12 +141,14 @@ Expected:
 - An incomplete session cannot extend into the next session.
 - Account events are preserved when valid.
 - `firstPlayed` / `lastPlayed` remain preserved during adapter edits.
+- Session IDs change after session/part edits and are re-resolved by the host.
 - Session ID is stable across part edits.
 - Event stream is valid for NXAL import.
 
 ### Session operations
 
-- Add a session.
+- Add a session with an explicit host user; an unmapped/ambiguous NXAL profile
+  must be rejected rather than assigned to the first profile.
 - Move a session start.
 - Change duration.
 - Delete a session.
@@ -189,7 +191,11 @@ Expected tools:
 - Export summary
 
 Each tool must show the NXAL environment selector. Fix/merge/deduplicate must
-write in place and leave `.bak` backups.
+write in place and leave `.bak` backups. Fix/merge/deduplicate must also show
+the two explicit options:
+
+- Keep summary-only titles (default on).
+- Recalculate first/last from events (default off).
 
 ### Validate export
 
@@ -218,16 +224,21 @@ Expected:
 ### Fix export in place
 
 1. Run on a copy with malformed/duplicate/orphan events and unsorted groups.
-2. Check the result and `.bak`.
+2. Run once with defaults and once with each option toggled.
+3. Check the result and `.bak`.
 
 Expected:
 
 - Invalid events removed.
 - Duplicate events removed by strict native identity.
 - Orphan focus removed.
-- Events sorted chronologically.
-- `firstPlayed` / `lastPlayed` repaired from event order.
-- `playtime` / `launches` repaired.
+- Events normalized within native session groups without interleaving
+  duplicate/near-duplicate sessions.
+- With **Recalculate first/last from events** off, valid PDM values remain.
+- With it on, first/last are event-derived.
+- With **Keep summary-only titles** on, a no-event summary remains untouched.
+- With it off, a no-event summary is reset to zero.
+- `playtime` / `launches` use NXAL-compatible `countPlaytime()` accounting.
 - No incomplete-session closure is performed by this tool.
 
 ### Merge exports in place
@@ -242,8 +253,11 @@ Expected:
 - Target has a `.bak`.
 - Sources are read-only.
 - Users/titles/events are merged by name/title/event identity.
-- Events are sorted.
-- Summary values are recomputed.
+- Events are normalized without crossing session boundaries.
+- Summary-only titles are preserved by default.
+- Valid PDM first/last values are preserved unless the recalculation option
+  is enabled.
+- NXAL-compatible playtime is used.
 - Validate the merged output and import it into NXAL.
 
 ### Deduplicate exports in place
@@ -258,7 +272,8 @@ Expected:
 - Every selected file is rewritten in place with a `.bak`.
 - Overlapping sessions are owned by the oldest export with `Closed`, or oldest
   `Launched` when no `Closed` exists.
-- Events are sorted and summaries recomputed.
+- Events are normalized and summaries use NXAL-compatible playtime.
+- Summary-only titles are kept exactly once in the oldest containing export.
 - Merge of deduplicated exports converges with merging originals.
 
 ### Export summary
@@ -321,7 +336,8 @@ Test on fresh and existing-PDM profiles:
 Expected:
 
 - Sessions with no matching Switch profile are silently skipped by NXAL.
-- Accountless groups are omitted by NXAL.
+- Accountless groups are omitted by NXAL; the host warns and its Fix action
+  rebuilds canonical account events.
 - A last-global trailing group is omitted by NXAL while host shows it.
 - Host warnings and validation results make the distinction visible.
 
@@ -333,8 +349,11 @@ Run every CLI on copies and compare with the Tools page.
 python3 validate_import.py copy.json
 python3 verify_import.py import.json importedData.json
 python3 fix_import.py copy.json --warnings
+python3 fix_import.py copy.json --warnings --recalculate-first-last
 python3 merge_exports.py merged.json first.json second.json
+python3 merge_exports.py --recalculate-first-last merged.json first.json second.json
 python3 deduplicate_exports.py first.json second.json
+python3 deduplicate_exports.py --drop-summary-only first.json second.json
 ```
 
 For each:
