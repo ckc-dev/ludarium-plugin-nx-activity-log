@@ -59,8 +59,8 @@ def count_launches(events):
     return sum(1 for ev in events if ev.get("type") == "Launched")
 
 
-def focus_intervals(events):
-    """Return (clock start, credited seconds) for completed focus pairs.
+def focus_spans(events):
+    """Return (clock start, clock end, credited seconds) for focus pairs.
 
     NXAL's countPlaytime() uses ``steadyTimestamp`` for a normal focus pair
     because that clock is monotonic. The wall clock is only the right choice
@@ -68,7 +68,7 @@ def focus_intervals(events):
     the credited duration here also gives callers the active intervals needed
     to place play correctly across hours, calendar days and midnight.
     """
-    intervals = []
+    spans = []
     start_steady = None
     start_clock = None
     for ev in events:
@@ -87,11 +87,17 @@ def focus_intervals(events):
                   and isinstance(end_clock, int)
                   and end_clock >= start_clock):
                 duration = end_clock - start_clock
-            if duration is not None and duration >= 0:
-                intervals.append((start_clock, duration))
+            if (duration is not None and duration >= 0
+                    and isinstance(end_clock, int)):
+                spans.append((start_clock, end_clock, duration))
             start_steady = None
             start_clock = None
-    return intervals
+    return spans
+
+
+def focus_intervals(events):
+    """Return (clock start, credited seconds) for completed focus pairs."""
+    return [(start, duration) for start, _end, duration in focus_spans(events)]
 
 
 def calculate_playtime(events):

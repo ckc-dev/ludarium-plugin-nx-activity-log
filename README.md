@@ -22,21 +22,27 @@ playtime; the adapter also returns `end_time` and `active_segments` because a
 NXAL session can contain pauses and therefore have `end - start != duration`.
 Charts and calendar views clip the active segments to their selected range.
 
-Synthesized sessions include `Account Login` and `Account Logout` events,
-which NXAL uses to attribute a session to a user. Session parts are keyed by
-title and event type as well as timestamp; required boundary/account events
-are read-only. A session without a `Closed` event is marked incomplete in the
-host; its **Fix** action adds the missing account-logout/closed events.
+NXAL uses `Account Login` / `Account Logout` events for user attribution, so
+the adapter generates them together with the `Launched` / `Gained Focus` /
+`Lost Focus` / `Closed` lifecycle. Session parts expose only logical active-play
+segments: users add, move, resize, or delete play intervals, and the adapter
+rebuilds the native event group, summaries, and part ids. Boundary and account
+events are derived and are never user-editable. Segment edits reject overlaps
+and cannot extend past a complete session's existing `Closed` boundary; use
+the whole-session editor first when a session needs more room. A session
+without a `Closed` event is marked incomplete in the host; its **Fix** action
+rebuilds the group with the missing account-logout/closed events.
 
 Exact duplicate native event groups are marked **Duplicate session** by the
 adapter. The host can show both as overlapping, but overlap is only a warning;
 the duplicate warning is exact. Its **Fix** action removes all but one copy of
 the identical group.
 
-Session part **Add play segment** adds credited focus time in a gap. It does
-not insert a pause: edit the surrounding focus events for pause changes.
-New games are written with a zero-valued summary so NXAL's importer keeps
-them even before their first session.
+**Add play segment** adds credited focus time in an inactive gap. Pauses are
+the gaps between play segments, so moving or deleting a segment changes the
+pause without a separate pause editor. New games are written with a
+zero-valued summary so NXAL's importer keeps them even before their first
+session.
 
 NXAL has no native session id, so the adapter derives a deterministic host id
 from the NXAL profile, title id and `Launched` event identity. It stays stable

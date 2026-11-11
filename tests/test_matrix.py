@@ -89,6 +89,8 @@ class TestNxalWriteMatrix(unittest.TestCase):
                 original['game_id'], original['date_time'])
             self.assertTrue(parts)
             editable = next(part for part in parts if part['editable'])
+            self.assertEqual(editable['type'], 'play')
+            self.assertEqual(editable['name'], 'Play segment 1')
             moved_start = (
                 datetime.strptime(
                     editable['start_time'], '%Y-%m-%d %H:%M:%S')

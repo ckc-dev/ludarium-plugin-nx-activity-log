@@ -123,30 +123,252 @@ class NxalSessionTest(unittest.TestCase):
                     '%Y-%m-%d %H:%M:%S'),
                 2)
 
-    def test_part_updates_move_steady_time_and_protect_required_events(self):
+    def test_parts_are_logical_play_segments_not_raw_events(self):
         path, adapter = self._adapter()
         game_id = 'nx_' + TITLE_ID
         start = adapter.fetch_dashboard_data()[1][0]['date_time']
         parts = adapter.get_session_parts(game_id, start)
-        gained = next(part for part in parts
-                      if part['type'] == 'Gained Focus')
-        moved = (datetime.strptime(
-            gained['start_time'], '%Y-%m-%d %H:%M:%S')
-            + timedelta(seconds=1)).strftime('%Y-%m-%d %H:%M:%S')
-        adapter.update_session_part(
-            gained['part_id'], None, moved, gained['start_time'])
-        events = adapter._load()['users'][0]['titles'][0]['events']
-        moved_event = next(event for event in events
-                           if event['type'] == 'Gained Focus')
-        self.assertEqual(moved_event['steadyTimestamp'], 103)
+        self.assertEqual(len(parts), 1)
+        part = parts[0]
+        self.assertEqual(part['type'], 'play')
+        self.assertEqual(part['name'], 'Play segment 1')
+        self.assertEqual(part['duration'], 100)
+        self.assertTrue(part['editable'])
+        self.assertEqual(
+            part['start_time'],
+            (datetime.strptime(start, '%Y-%m-%d %H:%M:%S')
+             + timedelta(seconds=2)).strftime('%Y-%m-%d %H:%M:%S'))
+        self.assertEqual(
+            part['end_time'],
+            (datetime.strptime(start, '%Y-%m-%d %H:%M:%S')
+             + timedelta(seconds=102)).strftime('%Y-%m-%d %H:%M:%S'))
+        self.assertEqual(
+            [item['type'] for item in parts], ['play'])
 
-        account = next(part for part in parts
-                       if part['type'] == 'Account Login')
+    def test_zero_duration_segments_have_distinct_part_ids(self):
+        start = int(datetime(2026, 1, 8, 10, 0, 0).timestamp())
+        events = [
+            {'type': 'Launched', 'clockTimestamp': start,
+             'steadyTimestamp': 100},
+            {'type': 'Gained Focus', 'clockTimestamp': start + 2,
+             'steadyTimestamp': 102},
+            {'type': 'Account Login', 'clockTimestamp': start + 3,
+             'steadyTimestamp': 103},
+            {'type': 'Lost Focus', 'clockTimestamp': start + 2,
+             'steadyTimestamp': 102},
+            {'type': 'Gained Focus', 'clockTimestamp': start + 2,
+             'steadyTimestamp': 104},
+            {'type': 'Lost Focus', 'clockTimestamp': start + 2,
+             'steadyTimestamp': 104},
+            {'type': 'Account Logout', 'clockTimestamp': start + 3,
+             'steadyTimestamp': 105},
+            {'type': 'Closed', 'clockTimestamp': start + 5,
+             'steadyTimestamp': 107},
+        ]
+        path, adapter = self._adapter(_payload(events))
+        row = adapter.fetch_dashboard_data()[1][0]
+        parts = adapter.get_session_parts('nx_' + TITLE_ID,
+                                          row['date_time'])
+        self.assertEqual(len(parts), 2)
+        self.assertEqual([part['duration'] for part in parts], [0, 0])
+        self.assertEqual(len({part['part_id'] for part in parts}), 2)
+        adapter.delete_session_part(parts[1]['part_id'])
+        remaining = adapter.get_session_parts('nx_' + TITLE_ID,
+                                              row['date_time'])
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(remaining[0]['duration'], 0)
+
+    def test_add_edit_delete_play_segments_rebuilds_lifecycle(self):
+        path, adapter = self._adapter(_payload([]))
+        game_id = 'nx_' + TITLE_ID
+        base = datetime(2026, 1, 2, 10, 0, 0)
+        base_text = base.strftime('%Y-%m-%d %H:%M:%S')
+        adapter.add_session(game_id, base_text, 100)
+        events = adapter._load()['users'][0]['titles'][0]['events']
+        self.assertEqual(
+            [event['type'] for event in events],
+            ['Launched', 'Gained Focus', 'Account Login', 'Lost Focus',
+             'Account Logout', 'Closed'])
+        base_ts = int(base.timestamp())
+        self.assertEqual(
+            [event['clockTimestamp'] for event in events],
+            [base_ts, base_ts + 2, base_ts + 3, base_ts + 102,
+             base_ts + 103, base_ts + 105])
+        self.assertEqual(
+            adapter.fetch_dashboard_data()[1][0]['duration'], 100)
+
+        parts = adapter.get_session_parts(game_id, base_text)
+        self.assertEqual(len(parts), 1)
+        adapter.update_session_part(
+            parts[0]['part_id'], 80,
+            parts[0]['start_time'], parts[0]['start_time'])
+        edited = adapter.get_session_parts(game_id, base_text)
+        self.assertEqual(edited[0]['duration'], 80)
+        self.assertEqual(
+            [event['type'] for event in
+             adapter._load()['users'][0]['titles'][0]['events']],
+            ['Launched', 'Gained Focus', 'Account Login', 'Lost Focus',
+             'Account Logout', 'Closed'])
+
+        adapter.add_session_part(
+            game_id,
+            (base + timedelta(seconds=83)).strftime('%Y-%m-%d %H:%M:%S'),
+            10)
+        parts = adapter.get_session_parts(game_id, base_text)
+        self.assertEqual([part['duration'] for part in parts], [80, 10])
+        self.assertEqual(parts[1]['break_before_seconds'], 1)
+        self.assertEqual(
+            [event['type'] for event in
+             adapter._load()['users'][0]['titles'][0]['events']],
+            ['Launched', 'Gained Focus', 'Account Login', 'Lost Focus',
+             'Gained Focus', 'Lost Focus', 'Account Logout', 'Closed'])
+        self.assertEqual(
+            adapter.fetch_dashboard_data()[1][0]['duration'], 90)
+
+        adapter.delete_session_part(parts[1]['part_id'])
+        remaining = adapter.get_session_parts(game_id, base_text)
+        self.assertEqual([part['duration'] for part in remaining], [80])
+        self.assertEqual(
+            [event['type'] for event in
+             adapter._load()['users'][0]['titles'][0]['events']],
+            ['Launched', 'Gained Focus', 'Account Login', 'Lost Focus',
+             'Account Logout', 'Closed'])
+
+    def test_segment_edits_reject_overlap_and_boundary_escape(self):
+        path, adapter = self._adapter(_payload([]))
+        game_id = 'nx_' + TITLE_ID
+        base = datetime(2026, 1, 2, 10, 0, 0)
+        base_text = base.strftime('%Y-%m-%d %H:%M:%S')
+        adapter.add_session(game_id, base_text, 100)
+        first = adapter.get_session_parts(game_id, base_text)[0]
+
         with self.assertRaises(AdapterOperationError):
             adapter.update_session_part(
-                account['part_id'], None, moved, account['start_time'])
+                first['part_id'], 120, first['start_time'],
+                first['start_time'])
+
+        with open(path, 'rb') as handle:
+            before = handle.read()
         with self.assertRaises(AdapterOperationError):
-            adapter.delete_session_part(account['part_id'])
+            adapter.add_session_part(
+                game_id,
+                (base + timedelta(seconds=3)).strftime('%Y-%m-%d %H:%M:%S'),
+                1)
+        with open(path, 'rb') as handle:
+            self.assertEqual(handle.read(), before)
+
+        adapter.add_session_part(
+            game_id,
+            (base + timedelta(seconds=103)).strftime('%Y-%m-%d %H:%M:%S'),
+            1)
+        parts = adapter.get_session_parts(game_id, base_text)
+        self.assertEqual(len(parts), 2)
+        with open(path, 'rb') as handle:
+            before = handle.read()
+        with self.assertRaises(AdapterOperationError):
+            adapter.update_session_part(
+                first['part_id'], 102, first['start_time'],
+                first['start_time'])
+        with open(path, 'rb') as handle:
+            self.assertEqual(handle.read(), before)
+        with self.assertRaises(AdapterOperationError):
+            adapter.update_session_part(
+                parts[1]['part_id'], 1,
+                (base + timedelta(seconds=101)).strftime(
+                    '%Y-%m-%d %H:%M:%S'),
+                parts[1]['start_time'])
+        with self.assertRaises(AdapterOperationError):
+            adapter.add_session_part(
+                game_id,
+                (base + timedelta(seconds=104)).strftime(
+                    '%Y-%m-%d %H:%M:%S'),
+                5)
+
+    def test_segment_edit_preserves_steady_playtime_and_session_id(self):
+        start = int(datetime(2026, 1, 6, 10, 0, 0).timestamp())
+        events = [
+            {'type': 'Launched', 'clockTimestamp': start,
+             'steadyTimestamp': 100},
+            {'type': 'Gained Focus', 'clockTimestamp': start + 2,
+             'steadyTimestamp': 102},
+            {'type': 'Account Login', 'clockTimestamp': start + 3,
+             'steadyTimestamp': 103},
+            {'type': 'Lost Focus', 'clockTimestamp': start + 22,
+             'steadyTimestamp': 122},
+            {'type': 'Gained Focus', 'clockTimestamp': start + 30,
+             'steadyTimestamp': 150},
+            {'type': 'Lost Focus', 'clockTimestamp': start + 60,
+             'steadyTimestamp': 180},
+            {'type': 'Account Logout', 'clockTimestamp': start + 61,
+             'steadyTimestamp': 181},
+            {'type': 'Closed', 'clockTimestamp': start + 62,
+             'steadyTimestamp': 182},
+        ]
+        path, adapter = self._adapter(_payload(events))
+        row = adapter.fetch_dashboard_data()[1][0]
+        session_id = row['session_id']
+        parts = adapter.get_session_parts('nx_' + TITLE_ID,
+                                          row['date_time'])
+        self.assertEqual([part['duration'] for part in parts], [20, 30])
+        adapter.update_session_part(
+            parts[0]['part_id'], 25, parts[0]['start_time'],
+            parts[0]['start_time'])
+        refreshed = adapter.fetch_dashboard_data()[1][0]
+        self.assertEqual(refreshed['session_id'], session_id)
+        self.assertEqual(refreshed['duration'], 55)
+        rebuilt = adapter.get_session_parts('nx_' + TITLE_ID,
+                                            refreshed['date_time'])
+        self.assertEqual([part['duration'] for part in rebuilt], [25, 30])
+        title = adapter._load()['users'][0]['titles'][0]
+        self.assertEqual(nxal_codec.calculate_playtime(title['events']), 55)
+
+    def test_update_session_rejects_resize_below_other_play_segments(self):
+        start = int(datetime(2026, 1, 7, 10, 0, 0).timestamp())
+        events = [
+            {'type': 'Launched', 'clockTimestamp': start,
+             'steadyTimestamp': 100},
+            {'type': 'Gained Focus', 'clockTimestamp': start + 2,
+             'steadyTimestamp': 102},
+            {'type': 'Account Login', 'clockTimestamp': start + 3,
+             'steadyTimestamp': 103},
+            {'type': 'Lost Focus', 'clockTimestamp': start + 60,
+             'steadyTimestamp': 162},
+            {'type': 'Gained Focus', 'clockTimestamp': start + 100,
+             'steadyTimestamp': 200},
+            {'type': 'Lost Focus', 'clockTimestamp': start + 300,
+             'steadyTimestamp': 210},
+            {'type': 'Account Logout', 'clockTimestamp': start + 301,
+             'steadyTimestamp': 211},
+            {'type': 'Closed', 'clockTimestamp': start + 303,
+             'steadyTimestamp': 213},
+        ]
+        path, adapter = self._adapter(_payload(events))
+        row = adapter.fetch_dashboard_data()[1][0]
+        self.assertEqual(row['duration'], 70)
+        with self.assertRaises(AdapterOperationError):
+            adapter.update_session(
+                'nx_' + TITLE_ID, 50, row['date_time'], row['date_time'],
+                session_id=row['session_id'])
+        self.assertEqual(adapter.fetch_dashboard_data()[1][0]['duration'], 70)
+
+    def test_cross_midnight_segment_edit_keeps_the_session_atomic(self):
+        start = int(datetime(2026, 1, 1, 23, 59, 0).timestamp())
+        path, adapter = self._adapter(_payload(
+            _complete_events(start=start, duration=120)))
+        before = adapter.fetch_dashboard_data()[1][0]
+        parts = adapter.get_session_parts('nx_' + TITLE_ID,
+                                          before['date_time'])
+        adapter.update_session_part(
+            parts[0]['part_id'], 60, parts[0]['start_time'],
+            parts[0]['start_time'])
+        rows = adapter.fetch_dashboard_data()[1]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['date_time'], before['date_time'])
+        self.assertEqual(rows[0]['duration'], 60)
+        self.assertIn('2026-01-02', rows[0]['end_time'])
+        after = adapter.get_session_parts('nx_' + TITLE_ID,
+                                          rows[0]['date_time'])
+        self.assertEqual(after[0]['duration'], 60)
 
     def test_fix_import_preserves_distinct_events_and_recomputes_summary(self):
         path, _adapter = self._adapter()
@@ -201,6 +423,9 @@ class NxalSessionTest(unittest.TestCase):
         row = adapter.fetch_dashboard_data()[1][0]
         self.assertTrue(row['repair_available'])
         self.assertIn('Incomplete', row['session_warning'])
+        self.assertEqual(
+            len(adapter.get_session_parts('nx_' + TITLE_ID,
+                                          row['date_time'])), 1)
         adapter.repair_incomplete_session(
             'nx_' + TITLE_ID, row['date_time'])
         repaired = adapter.fetch_dashboard_data()[1][0]
@@ -208,8 +433,10 @@ class NxalSessionTest(unittest.TestCase):
         self.assertEqual(repaired['session_warning'], '')
         types = [event['type'] for event in
                  adapter._load()['users'][0]['titles'][0]['events']]
-        self.assertIn('Account Logout', types)
-        self.assertIn('Closed', types)
+        self.assertEqual(
+            types,
+            ['Launched', 'Gained Focus', 'Account Login', 'Lost Focus',
+             'Account Logout', 'Closed'])
 
     def test_update_session_preserves_existing_focus_and_account_events(self):
         start = int(datetime(2026, 1, 4, 10, 0, 0).timestamp())
@@ -288,6 +515,7 @@ class NxalSessionTest(unittest.TestCase):
             'nx_' + TITLE_ID, row['date_time'], session_id=row['session_id'])
         repaired = adapter.fetch_dashboard_data()[1][0]
         self.assertFalse(repaired['repair_available'])
+        self.assertEqual(repaired['session_id'], row['session_id'])
         event_types = [event['type'] for event in
                        adapter._load()['users'][0]['titles'][0]['events']]
         self.assertIn('Account Login', event_types)
