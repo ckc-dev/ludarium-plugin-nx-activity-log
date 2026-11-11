@@ -242,6 +242,8 @@ def merge_export(params, ctx):
             f"Users: {stats['users']}",
             f"Titles: {stats['titles']}",
             f"Events: {stats['events']}",
+            f"Accountless sessions: {stats['accountless_after']}/"
+            f"{stats['accountless_before']}",
         ],
     }
 
@@ -276,6 +278,8 @@ def deduplicate_export(params, ctx):
             f"Sessions: {stats['sessions_after']}/"
             f"{stats['sessions_before']}",
             f"Events: {stats['events_after']}/{stats['events_before']}",
+            f"Accountless sessions: {stats['accountless_after']}/"
+            f"{stats['accountless_before']}",
             f"Titles: {stats['titles_after']}",
         ])
     return {

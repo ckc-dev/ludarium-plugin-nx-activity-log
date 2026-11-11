@@ -43,9 +43,10 @@ from nxal_codec import (
     event_key,
     load_json,
     normalize_event_order,
+    normalize_export_events,
     write_export_json,
 )
-from nxal_repair import updated_summary
+from nxal_repair import ensure_mergeable_export, updated_summary
 
 # Session identity uses the shared 3-field NXAL key applied to the session's
 # 'Launched' marker. This makes deduplicate_exports agree with
@@ -66,7 +67,8 @@ def extract_sessions(events):
             "start": clockTimestamp of Launched,
             "end": clockTimestamp of Closed (or None if incomplete),
             "events": [all events in this session],
-            "complete": bool
+            "complete": bool,
+            "accountless": bool
         }
     """
     sessions = []
@@ -84,6 +86,7 @@ def extract_sessions(events):
                 "end": None,
                 "events": [ev],
                 "complete": False,
+                "accountless": True,
             }
         elif et == "Closed" and current is not None:
             current["events"].append(ev)
@@ -93,6 +96,8 @@ def extract_sessions(events):
             current = None
         elif current is not None:
             current["events"].append(ev)
+            if et in ("Account Login", "Account Logout"):
+                current["accountless"] = False
 
     if current is not None:
         current["complete"] = False
@@ -149,7 +154,9 @@ def build_session_index(exports, match_by, renames):
                     key = session_key(sess, title_id, ident)
                     if key not in index:
                         index[key] = []
-                    index[key].append((export_idx, sess, sess["complete"]))
+                    index[key].append((
+                        export_idx, sess, sess["complete"],
+                        sess["accountless"]))
 
     return index
 
@@ -166,14 +173,19 @@ def determine_ownership(session_index, num_exports):
     ownership = {}
 
     for key, entries in session_index.items():
-        exports_with_closed = [
-            export_idx for export_idx, sess, has_closed in entries if has_closed
+        # Prefer an account-bearing copy of the same native session. This lets
+        # a repaired/accountful export replace an older accountless copy
+        # instead of preserving the unusable one.
+        accountful = [
+            entry for entry in entries if not entry[3]
         ]
-
-        if exports_with_closed:
-            ownership[key] = min(exports_with_closed)
-        else:
-            ownership[key] = min(export_idx for export_idx, _, _ in entries)
+        candidates = accountful or entries
+        exports_with_closed = [
+            entry[0] for entry in candidates if entry[2]
+        ]
+        ownership[key] = (
+            min(exports_with_closed) if exports_with_closed
+            else min(entry[0] for entry in candidates))
 
     return ownership
 
@@ -193,6 +205,8 @@ def rebuild_export(data, ownership, export_idx, match_by, renames,
     total_sessions_after = 0
     total_events_before = 0
     total_events_after = 0
+    accountless_before = 0
+    accountless_after = 0
 
     for user in data.get("users", []):
         user_id = user.get("id")
@@ -206,6 +220,8 @@ def rebuild_export(data, ownership, export_idx, match_by, renames,
 
             total_sessions_before += len(sessions)
             total_events_before += len(events)
+            accountless_before += sum(
+                1 for session in sessions if session["accountless"])
 
             if not sessions:
                 summary_key = (str(match_id), str(title_id))
@@ -273,6 +289,8 @@ def rebuild_export(data, ownership, export_idx, match_by, renames,
         "sessions_after": total_sessions_after,
         "events_before": total_events_before,
         "events_after": total_events_after,
+        "accountless_before": accountless_before,
+        "accountless_after": accountless_after,
         "titles_after": sum(len(u.get("titles", [])) for u in new_users),
     }
 
@@ -318,7 +336,10 @@ def deduplicate_paths(input_paths, match_by="name", renames=None, backup=True,
     for path in input_paths:
         if not os.path.exists(path):
             raise FileNotFoundError(f"{path} not found")
-        exports.append((path, load_json(path)))
+        data = load_json(path)
+        ensure_mergeable_export(data, path)
+        normalize_export_events(data)
+        exports.append((path, data))
     exports.sort(key=lambda item: item[1].get("exportTimestamp", 0))
 
     session_index = build_session_index(exports, match_by, renames)

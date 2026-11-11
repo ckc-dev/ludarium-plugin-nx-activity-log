@@ -5,7 +5,7 @@ Signature honored by the host: ``PLUGIN_HEALTH(path, config, ctx) -> [{'level','
 
 import os
 
-from nxal_codec import calculate_nxal_playtime, count_launches, load_json
+from nxal_codec import calculate_nxal_playtime, count_nxal_launches, load_json
 
 
 def check_path(path, config, ctx):
@@ -18,7 +18,7 @@ def check_path(path, config, ctx):
         return [{"level": "error", "message": f"Could not read export: {e}"}]
 
     users = data.get("users", [])
-    launches = sum(count_launches(t.get("events", []))
+    launches = sum(count_nxal_launches(t.get("events", []))
                    for u in users for t in u.get("titles", []))
     minutes = sum(calculate_nxal_playtime(t.get("events", [])) for u in users
                   for t in u.get("titles", [])) / 60.0

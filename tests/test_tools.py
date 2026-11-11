@@ -6,12 +6,15 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-from plugins.nx_activity_log import fix_import as fix_import_cli
 from plugins.nx_activity_log import (
+    deduplicate_exports,
+    merge_exports,
     nxal_codec,
+    nxal_repair,
     plugin_tools,
     verify_import,
 )
+from plugins.nx_activity_log import fix_import as fix_import_cli
 
 TITLE_ID = '0100DEADBEEF0000'
 USER_ID = 'A' * 32
@@ -136,6 +139,40 @@ class TestEnvironmentTools(unittest.TestCase):
         self.assertFalse(result.passed)
         self.assertTrue(any('unambiguously' in error
                             for error in result.errors))
+
+
+
+    def test_deduplicate_normalizes_input_before_grouping(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data = _payload()
+            data['users'][0]['titles'][0]['events'] = list(reversed(
+                data['users'][0]['titles'][0]['events']))
+            one = self._write(directory, 'one.json', data)
+            two = self._write(directory, 'two.json', data)
+            results = deduplicate_exports.deduplicate_paths(
+                [one, two], backup=False)
+            self.assertEqual(
+                sum(result['events_after'] for result in results), 6)
+            events = [
+                title['events']
+                for path in (one, two)
+                for user in nxal_codec.load_json(path)['users']
+                for title in user.get('titles', [])
+            ]
+            self.assertEqual(len(events), 1)
+            self.assertEqual(len(events[0]), 6)
+
+    def test_merge_and_dedup_reject_malformed_events(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data = _payload()
+            data['users'][0]['titles'][0]['events'].append('bad-event')
+            one = self._write(directory, 'one.json', data)
+            two = self._write(directory, 'two.json', data)
+            with self.assertRaises(ValueError):
+                merge_exports.merge_paths(one, [one, two], backup=False)
+            with self.assertRaises(ValueError):
+                deduplicate_exports.deduplicate_paths(
+                    [one, two], backup=False)
 
 
     def test_merge_export_uses_target_in_place_and_backs_up(self):
@@ -263,6 +300,77 @@ class TestEnvironmentTools(unittest.TestCase):
             ]
             self.assertEqual(len(titles), 1)
             self.assertEqual(titles[0]['summary'], summary)
+
+
+    def test_dedup_prefers_accountful_copy_of_same_session(self):
+        with tempfile.TemporaryDirectory() as directory:
+            accountful = _payload()
+            accountless = _payload()
+            accountless['users'][0]['titles'][0]['events'] = [
+                event for event in accountless['users'][0]['titles'][0][
+                    'events']
+                if event['type'] not in ('Account Login', 'Account Logout')
+            ]
+            # Make the accountless file the older owner; the accountful copy
+            # must still win.
+            accountless['exportTimestamp'] = START - 10
+            one = self._write(directory, 'accountless.json', accountless)
+            two = self._write(directory, 'accountful.json', accountful)
+            deduplicate_exports.deduplicate_paths([one, two], backup=False)
+            titles = [
+                title
+                for path in (one, two)
+                for user in nxal_codec.load_json(path)['users']
+                for title in user.get('titles', [])
+            ]
+            self.assertEqual(len(titles), 1)
+            self.assertTrue(any(
+                event['type'] == 'Account Login'
+                for event in titles[0]['events']))
+
+    def test_merge_combines_accountless_and_accountful_session(self):
+        with tempfile.TemporaryDirectory() as directory:
+            accountful = _payload()
+            accountless = _payload()
+            accountless['exportTimestamp'] = START - 10
+            accountless['users'][0]['titles'][0]['events'] = [
+                event for event in accountless['users'][0]['titles'][0][
+                    'events']
+                if event['type'] not in ('Account Login', 'Account Logout')
+            ]
+            target = self._write(directory, 'target.json', accountless)
+            source = self._write(directory, 'source.json', accountful)
+            merge_exports.merge_paths(target, [target, source], backup=False)
+            title = nxal_codec.load_json(target)['users'][0]['titles'][0]
+            self.assertTrue(any(
+                event['type'] == 'Account Login'
+                for event in title['events']))
+            self.assertEqual(
+                nxal_repair.summary_for_events(title['events'])['launches'],
+                1)
+
+
+
+    def test_cli_recalculate_first_last_does_not_require_warnings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data = _payload()
+            data['users'][0]['titles'][0]['summary'] = {
+                'firstPlayed': 1, 'lastPlayed': 2,
+                'playtime': 30, 'launches': 1,
+            }
+            path = self._write(directory, 'import.json', data)
+            with mock.patch.object(fix_import_cli, 'FIX_WARNINGS', False), \
+                    mock.patch.object(fix_import_cli, 'FIX_FIRST_LAST', True), \
+                    mock.patch.object(
+                        fix_import_cli.sys, 'argv',
+                        ['fix_import.py', path]), \
+                    mock.patch('builtins.input', return_value='y'):
+                fix_import_cli.main()
+            summary = nxal_codec.load_json(path)['users'][0]['titles'][0][
+                'summary']
+            self.assertEqual(summary['firstPlayed'], START + 3)
+            self.assertEqual(summary['lastPlayed'], START + 32)
+
 
     def test_cli_fix_first_last_matches_tool_behavior(self):
         summary = {

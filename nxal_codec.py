@@ -121,44 +121,41 @@ def calculate_playtime(events):
     return sum(duration for _start, duration in focus_intervals(events))
 
 
-def calculate_nxal_playtime(events):
-    """Reproduce NXAL ``countPlaytime()`` summary accounting.
-
-    NXAL walks each native session separately. A Lost Focus normally credits
-    steadyTimestamp - previous Gained Focus steadyTimestamp. Repeated Lost
-    Focus events are skipped, but a Lost Focus separated from the previous
-    one by account events is counted again from the previous focus start.
-    This is the accounting NXAL uses when writing export summaries.
-
-    Session boundaries reset the reference values, matching the outer loop in
-    ``PlayData::countPlaytime``. The function deliberately mirrors that
-    behavior so tool-written summaries agree with NXAL even when malformed
-    focus sequences are retained.
-    """
+def _nxal_playtime_for_group(group):
+    """CountPlaytime() accounting for one NXAL-recognized session group."""
     total = 0
     last_ts = 0
     index = 0
-    while index < len(events):
-        event = events[index]
+    while index < len(group):
+        event = group[index]
         event_type = event.get("type")
         if event_type == "Launched":
-            # NXAL calls countPlaytime() once per PD session.
             last_ts = 0
         elif event_type == "Gained Focus":
             last_ts = event.get("steadyTimestamp", 0)
         elif event_type == "Lost Focus":
             steady = event.get("steadyTimestamp")
-            clock = event.get("clockTimestamp")
-            if isinstance(steady, int) and isinstance(clock, int):
-                # Full-range countPlaytime() uses the steady clock. If a
-                # malformed sequence has no preceding focus, NXAL still
-                # performs this subtraction; preserve that behavior.
+            if isinstance(steady, int):
                 total += steady - last_ts
-            while (index + 1 < len(events)
-                   and events[index + 1].get("type") == "Lost Focus"):
+            while (index + 1 < len(group)
+                   and group[index + 1].get("type") == "Lost Focus"):
                 index += 1
         index += 1
     return total
+
+
+def calculate_nxal_playtime(events):
+    """Reproduce NXAL ``countPlaytime()`` summary accounting.
+
+    NXAL only counts sessions with an account event matching the active user;
+    accountless groups are excluded. Within each session, repeated Lost Focus
+    events are skipped, while a Lost Focus separated by account events is
+    counted again from the previous focus start.
+    """
+    return sum(
+        _nxal_playtime_for_group(group)
+        for group in nxal_session_groups(events)
+    )
 
 
 def find_duplicate_events(events):
@@ -474,6 +471,45 @@ def normalize_event_order(events):
     for group in groups_by_start:
         normalized.extend(sort_events(group))
     return normalized
+
+
+
+def normalize_export_events(data):
+    """Normalize event order for every title in an export in place."""
+    for user in data.get("users", []):
+        for title in user.get("titles", []):
+            events = title.get("events")
+            if isinstance(events, list):
+                title["events"] = normalize_event_order(events)
+    return data
+
+
+def nxal_session_groups(events):
+    """Return session groups NXAL would recognize for the title/user.
+
+    NXAL's getPDSessions() requires an account event before it emits a
+    session; accountless groups are therefore not counted in summary
+    playtime or launches.
+    """
+    return [
+        group for group in _title_session_pairs([{"events": events}])
+        if any(event.get("type") in ("Account Login", "Account Logout")
+               for event in group)
+    ]
+
+
+def count_nxal_launches(events):
+    """Return NXAL's session-based launch count."""
+    return len(nxal_session_groups(events))
+
+
+def count_accountless_sessions(events):
+    """Count session groups that have no account event."""
+    return sum(
+        1 for group in _title_session_pairs([{"events": events}])
+        if not any(event.get("type") in ("Account Login", "Account Logout")
+                   for event in group)
+    )
 
 
 def _parse_dt(value):

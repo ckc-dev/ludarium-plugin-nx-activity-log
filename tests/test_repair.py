@@ -86,6 +86,23 @@ class TestRepairEvents(unittest.TestCase):
         self.assertNotIn("Lost Focus", [event["type"] for event in repaired])
         self.assertEqual(len(repaired), 3)
 
+    def test_nxal_launches_require_account_events(self):
+        accountful = _events()
+        accountless = [
+            event for event in accountful
+            if event["type"] not in ("Account Login", "Account Logout")
+        ]
+        self.assertEqual(nxal_repair.summary_for_events(
+            accountful)["launches"], 1)
+        self.assertEqual(nxal_repair.summary_for_events(
+            accountless)["launches"], 0)
+        self.assertEqual(nxal_codec.count_nxal_launches(accountless), 0)
+
+    def test_nxal_launches_count_session_groups(self):
+        events = _events() + _events()
+        self.assertEqual(nxal_codec.count_nxal_launches(events), 2)
+        self.assertEqual(nxal_repair.summary_for_events(events)["launches"], 2)
+
     def test_nxal_playtime_includes_account_separated_orphan(self):
         events = [
             {"type": "Launched", "clockTimestamp": START,

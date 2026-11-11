@@ -10,7 +10,7 @@ from nxal_codec import (
     EVENT_IDENTITY_KEY,
     VALID_EVENT_TYPES,
     calculate_nxal_playtime,
-    count_launches,
+    count_nxal_launches,
     deduplicate_events,
     find_orphaned_lost_focus,
     first_last_from_events,
@@ -78,7 +78,7 @@ def summary_for_events(events, fallback_first=0, fallback_last=0):
     return {
         "firstPlayed": first_played,
         "lastPlayed": last_played,
-        "launches": count_launches(events),
+        "launches": count_nxal_launches(events),
         "playtime": calculate_nxal_playtime(events),
     }
 
@@ -153,6 +153,61 @@ def updated_summary(summary, events, *, recalculate_first_last=False,
         preserve_empty=preserve_empty,
     )
     return updated
+
+
+
+def ensure_mergeable_export(data, label="export"):
+    """Reject structurally malformed data before merge/dedup transformations.
+
+    Unlike fix_export, merge/deduplicate cannot safely guess what a malformed
+    event or title was meant to represent. Return a clear ``ValueError`` so
+    the CLI/tool can report the exact input instead of raising an incidental
+    AttributeError halfway through a merge.
+    """
+    if not isinstance(data, dict):
+        raise ValueError(f"{label}: top-level JSON value is not an object")
+    users = data.get("users")
+    if not isinstance(users, list):
+        raise ValueError(f"{label}: 'users' is not an array")
+    for user_index, user in enumerate(users):
+        if not isinstance(user, dict):
+            raise ValueError(f"{label}: user #{user_index} is not an object")
+        if not isinstance(user.get("id"), str) or not user.get("id"):
+            raise ValueError(f"{label}: user #{user_index} has no valid id")
+        if not isinstance(user.get("name"), str) or not user.get("name"):
+            raise ValueError(f"{label}: user #{user_index} has no name")
+        titles = user.get("titles")
+        if not isinstance(titles, list):
+            raise ValueError(
+                f"{label}: user #{user_index} 'titles' is not an array")
+        for title_index, title in enumerate(titles):
+            if not isinstance(title, dict):
+                raise ValueError(
+                    f"{label}: user #{user_index}, title #{title_index} "
+                    "is not an object")
+            if not isinstance(title.get("id"), str) or not title.get("id"):
+                raise ValueError(
+                    f"{label}: user #{user_index}, title #{title_index} "
+                    "has no valid id")
+            if not isinstance(title.get("name"), str) or not title.get("name"):
+                raise ValueError(
+                    f"{label}: user #{user_index}, title #{title_index} "
+                    "has no name")
+            if not isinstance(title.get("events"), list):
+                raise ValueError(
+                    f"{label}: user #{user_index}, title #{title_index} "
+                    "'events' is not an array")
+            summary = title.get("summary")
+            if summary is not None and not isinstance(summary, dict):
+                raise ValueError(
+                    f"{label}: user #{user_index}, title #{title_index} "
+                    "'summary' is not an object")
+            invalid = find_invalid_event_fields(title["events"])
+            if invalid:
+                event_index, field = invalid[0]
+                raise ValueError(
+                    f"{label}: user #{user_index}, title #{title_index}, "
+                    f"event #{event_index} has invalid '{field}'")
 
 
 def repair_title(title, *, preserve_summary_only=True,

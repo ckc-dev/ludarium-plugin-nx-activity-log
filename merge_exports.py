@@ -18,12 +18,13 @@ import sys
 
 from nxal_codec import (
     EVENT_IDENTITY_KEY,
+    count_accountless_sessions,
     deduplicate_events,
     load_json,
     normalize_event_order,
     write_export_json,
 )
-from nxal_repair import updated_summary
+from nxal_repair import ensure_mergeable_export, updated_summary
 
 # The shared EVENT_IDENTITY_KEY is NXAL's per-event identity. steadyTimestamp
 # (the monotonic boot clock) is NOT redundant with clockTimestamp: two events
@@ -215,11 +216,17 @@ def merge_paths(output_path, input_paths, backup=True, *,
         if not os.path.exists(path):
             raise FileNotFoundError(f"{path} not found")
         data = load_json(path)
+        ensure_mergeable_export(data, path)
         inputs.append(data)
         users = data.get("users", [])
         titles = sum(len(u.get("titles", [])) for u in users)
         loaded.append((path, len(users), titles))
 
+    accountless_before = sum(
+        count_accountless_sessions(title.get("events", []))
+        for data in inputs
+        for user in data.get("users", [])
+        for title in user.get("titles", []))
     merged_users = []
     for data in inputs:
         merged_users = merge_users(
@@ -231,6 +238,9 @@ def merge_paths(output_path, input_paths, backup=True, *,
     total_titles = sum(len(u.get("titles", [])) for u in merged_users)
     total_events = sum(
         len(t["events"]) for u in merged_users for t in u.get("titles", []))
+    accountless_after = sum(
+        count_accountless_sessions(t.get("events", []))
+        for u in merged_users for t in u.get("titles", []))
 
     if backup and os.path.exists(output_path):
         shutil.copy2(output_path, output_path + ".bak")
@@ -244,6 +254,8 @@ def merge_paths(output_path, input_paths, backup=True, *,
         "users": len(merged_users),
         "titles": total_titles,
         "events": total_events,
+        "accountless_before": accountless_before,
+        "accountless_after": accountless_after,
         "backup": (output_path + ".bak" if backup
                    and os.path.exists(output_path + ".bak") else None),
     }
