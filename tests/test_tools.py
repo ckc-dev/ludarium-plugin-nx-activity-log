@@ -4,7 +4,9 @@ import os
 import tempfile
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
+from plugins.nx_activity_log import fix_import as fix_import_cli
 from plugins.nx_activity_log import nxal_codec, plugin_tools
 
 TITLE_ID = '0100DEADBEEF0000'
@@ -148,6 +150,18 @@ class TestEnvironmentTools(unittest.TestCase):
                     for user in nxal_codec.load_json(path)['users']
                     for title in user.get('titles', []))
             self.assertEqual(len(remaining), 1)
+
+    def test_cli_fix_first_last_matches_tool_behavior(self):
+        summary = {
+            'firstPlayed': 1, 'lastPlayed': 2,
+            'playtime': 30, 'launches': 1,
+        }
+        with mock.patch('builtins.input', return_value='y'):
+            fixed, changed = fix_import_cli.fix_first_last(
+                summary, _events(START))
+        self.assertTrue(changed)
+        self.assertEqual(fixed['firstPlayed'], START + 3)
+        self.assertEqual(fixed['lastPlayed'], START + 32)
 
     def test_fix_export_sorts_and_repairs_summary(self):
         with tempfile.TemporaryDirectory() as directory:
