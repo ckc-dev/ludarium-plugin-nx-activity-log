@@ -109,7 +109,8 @@ Expected:
 
 1. Create a Ludarium NXAL environment pointing at a **copy** of the Switch
    export.
-2. Configure `profile_mapping` for the Switch users.
+2. Open the environment profile picker and bind each discovered Switch profile
+   to the matching GameTime user.
 3. Open Sessions and Games.
 4. Compare against the NXAL export.
 
@@ -177,7 +178,7 @@ Expected:
 
 - The other user's session is untouched.
 - Session parts use exact session IDs.
-- Profile mapping does not cause cross-user edits.
+- Profile bindings do not cause cross-user edits.
 
 ## Phase 4: Tools page
 
