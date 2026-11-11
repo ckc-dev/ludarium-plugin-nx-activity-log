@@ -2,9 +2,11 @@
 
 ## NX-Activity-Log
 
-This plugin interoperates with
-[NX-Activity-Log](https://github.com/tallbl0nde/NX-Activity-Log), Copyright (c)
-2020 tallbl0nde.
+This plugin interoperates with the maintained
+[NX-Activity-Log fork](https://github.com/zdm65477730/NX-Activity-Log), based on
+the archived
+[tallbl0nde/NX-Activity-Log](https://github.com/tallbl0nde/NX-Activity-Log).
+Copyright (c) 2020 tallbl0nde.
 
 The upstream project is distributed under the MIT License:
 

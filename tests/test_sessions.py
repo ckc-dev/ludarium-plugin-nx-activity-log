@@ -233,10 +233,12 @@ class NxalSessionTest(unittest.TestCase):
         ]
         path, adapter = self._adapter(_payload(events))
         before = adapter._load()['users'][0]['titles'][0]['events']
+        row = adapter.fetch_dashboard_data()[1][0]
         adapter.update_session(
             'nx_' + TITLE_ID, 150, datetime.fromtimestamp(
                 start).strftime('%Y-%m-%d %H:%M:%S'),
-            datetime.fromtimestamp(start).strftime('%Y-%m-%d %H:%M:%S'))
+            datetime.fromtimestamp(start).strftime('%Y-%m-%d %H:%M:%S'),
+            session_id=row['session_id'])
         after = adapter._load()['users'][0]['titles'][0]['events']
         self.assertEqual([event['type'] for event in after],
                          [event['type'] for event in before])
@@ -244,6 +246,52 @@ class NxalSessionTest(unittest.TestCase):
         self.assertEqual(
             sum(1 for event in after if event['type'] == 'Gained Focus'), 2)
         self.assertIn('Account Logout', [event['type'] for event in after])
+
+
+    def test_session_ids_disambiguate_identical_start_times(self):
+        data = _payload(_complete_events())
+        other = json.loads(json.dumps(data['users'][0]['titles'][0]))
+        other['id'] = 'C' * 16
+        other['name'] = 'Other Game'
+        data['users'][0]['titles'].append(other)
+        path, adapter = self._adapter(data)
+        rows = adapter.fetch_dashboard_data()[1]
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(len({row['session_id'] for row in rows}), 2)
+        adapter.delete_session(
+            rows[0]['date_time'], session_id=rows[0]['session_id'])
+        remaining = adapter.fetch_dashboard_data()[1]
+        self.assertEqual(len(remaining), 1)
+        self.assertNotEqual(
+            remaining[0]['session_id'], rows[0]['session_id'])
+
+
+    def test_delete_session_by_date_uses_the_legacy_fallback(self):
+        path, adapter = self._adapter()
+        row = adapter.fetch_dashboard_data()[1][0]
+        adapter.delete_session(row['date_time'])
+        self.assertEqual(adapter.fetch_dashboard_data()[1], [])
+
+    def test_repair_by_session_id_uses_the_exact_group(self):
+        start = int(datetime(2026, 1, 5, 12, 0, 0).timestamp())
+        events = [
+            {'type': 'Launched', 'clockTimestamp': start,
+             'steadyTimestamp': 500},
+            {'type': 'Gained Focus', 'clockTimestamp': start + 2,
+             'steadyTimestamp': 502},
+            {'type': 'Lost Focus', 'clockTimestamp': start + 62,
+             'steadyTimestamp': 562},
+        ]
+        path, adapter = self._adapter(_payload(events))
+        row = adapter.fetch_dashboard_data()[1][0]
+        adapter.repair_incomplete_session(
+            'nx_' + TITLE_ID, row['date_time'], session_id=row['session_id'])
+        repaired = adapter.fetch_dashboard_data()[1][0]
+        self.assertFalse(repaired['repair_available'])
+        event_types = [event['type'] for event in
+                       adapter._load()['users'][0]['titles'][0]['events']]
+        self.assertIn('Account Login', event_types)
+        self.assertEqual(event_types[-2:], ['Account Logout', 'Closed'])
 
 
 

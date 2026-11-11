@@ -54,6 +54,7 @@ class TestNxalCapabilities(unittest.TestCase):
             _nxal_fixture(path)
             adapter = NXALGameTrackerAdapter('nxal', 'NXAL', path, 1)
             self.assertTrue(adapter.supports_session_write)
+            self.assertTrue(adapter.supports_session_ids)
             self.assertTrue(adapter.supports_session_repair)
             self.assertTrue(adapter.supports_game_write)
             self.assertTrue(adapter.supports_game_merge)
@@ -106,8 +107,9 @@ class TestNxalWriteMatrix(unittest.TestCase):
                           if s['date_time'] == '2026-01-02 10:00:00')
             merge = SessionMerge(
                 primary=SessionRef(
-                    'nxal', original['date_time'], None),
-                absorbed=(SessionRef('nxal', second['date_time'], None),),
+                    'nxal', original['date_time'], original['session_id']),
+                absorbed=(SessionRef(
+                    'nxal', second['date_time'], second['session_id']),),
                 duration=4000,
             )
             adapter.apply_merges([merge])
@@ -115,7 +117,8 @@ class TestNxalWriteMatrix(unittest.TestCase):
             self.assertEqual(len(sessions), 1)
 
             adapter.apply_cleanup([
-                SessionRef('nxal', sessions[0]['date_time'], None)])
+                SessionRef('nxal', sessions[0]['date_time'],
+                           sessions[0]['session_id'])])
             _, sessions, _ = adapter.fetch_dashboard_data()
             self.assertEqual(sessions, [])
 

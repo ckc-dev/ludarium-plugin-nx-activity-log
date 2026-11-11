@@ -33,13 +33,24 @@ not insert a pause: edit the surrounding focus events for pause changes.
 New games are written with a zero-valued summary so NXAL's importer keeps
 them even before their first session.
 
+NXAL has no native session id, so the adapter derives a deterministic host id
+from the NXAL profile, title id and `Launched` event identity. It stays stable
+across duration/part edits and incomplete-session repair; moving the start
+creates a new id and the host migrates the user override. Exact ids also let
+two sessions starting in the same second be edited or deleted independently.
+Two completely identical `Launched` events in one title remain inherently
+indistinguishable without a persistent native field.
+
 ## Acknowledgements
 
 This plugin is designed to interoperate with
-[NX-Activity-Log](https://github.com/tallbl0nde/NX-Activity-Log) by tallbl0nde,
-which is distributed under the MIT License. The upstream project supplied the
-export format and behavior this adapter follows; its copyright and license are
-preserved in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+the maintained
+[NX-Activity-Log fork](https://github.com/zdm65477730/NX-Activity-Log), based on
+the archived
+[tallbl0nde/NX-Activity-Log](https://github.com/tallbl0nde/NX-Activity-Log).
+The upstream project supplied the export format and behavior this adapter
+follows; its MIT copyright and license are preserved in
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 
 This project is not affiliated with or endorsed by Nintendo.
 

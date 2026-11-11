@@ -23,6 +23,7 @@ deduplicate_exports / fix_import / validate_import).
 """
 
 import copy
+import hashlib
 import json
 import os
 import sys
@@ -114,6 +115,27 @@ def _group_bounds(events, event_index):
     return start, end
 
 
+def _session_id(user_name, title, group):
+    """Stable host-side identity for one native NXAL session.
+
+    The Launched event's (clock, steady) pair is stable across duration edits,
+    part edits and incomplete-session repair. Including the NXAL profile and
+    title id separates sessions that start in the same second in different
+    games or profiles. Two completely identical Launched events in one title
+    remain inherently indistinguishable without a persistent native id.
+    """
+    launched = group[0] if group else {}
+    parts = [
+        str(user_name),
+        str(title.get("id", "")),
+        str(launched.get("type")),
+        str(launched.get("clockTimestamp")),
+        str(launched.get("steadyTimestamp")),
+    ]
+    digest = hashlib.sha1("\x1f".join(parts).encode("utf-8")).hexdigest()
+    return f"nx_{digest[:24]}"
+
+
 def _synthetic_session_events(start_ts, duration, anchor):
     """Build a complete NXAL session, including account attribution events."""
     offsets = (
@@ -154,6 +176,7 @@ class NXALGameTrackerAdapter:
     # lossy (users/events are reconstructed), so it must not be offered as a
     # database-merge endpoint until that contract is made complete.
     supports_session_write = True
+    supports_session_ids = True
     supports_session_repair = True
     supports_game_write = True
     supports_game_merge = True
@@ -274,6 +297,36 @@ class NXALGameTrackerAdapter:
                 return t
         return None
 
+    def _find_session_by_id(self, data, session_id):
+        """Return (user_name, title, group) for a synthetic session id."""
+        wanted = str(session_id)
+        for user_name, title in self._titles(data):
+            for group in _title_session_pairs([title]):
+                if _session_id(user_name, title, group) == wanted:
+                    return user_name, title, group
+        return None
+
+    @staticmethod
+    def _group_start_index(events, group):
+        """Find the list index of the exact first event object in a group."""
+        first = group[0]
+        for index, event in enumerate(events):
+            if event is first:
+                return index
+        raise AdapterOperationError("Could not locate the session event group.")
+
+    def _remove_session_by_id(self, data, session_id):
+        found = self._find_session_by_id(data, session_id)
+        if found is None:
+            return False
+        _user_name, title, group = found
+        events = title.setdefault("events", [])
+        start = self._group_start_index(events, group)
+        end = start + len(group)
+        del events[start:end]
+        self._recompute_title(data, title)
+        return True
+
     # ---------- game dictionary ----------
     def _game_entries(self, data):
         out = []
@@ -322,6 +375,7 @@ class NXALGameTrackerAdapter:
                     "game_id": game_id,
                     "name": t.get("name", "Unknown"),
                     "native_user_id": self._user_id_for(user_name),
+                    "session_id": _session_id(user_name, t, group),
                     "date_time": format_timestamp(start_ts),
                     "end_time": format_timestamp(end_ts),
                     "active_segments": _group_active_segments(group),
@@ -566,33 +620,50 @@ class NXALGameTrackerAdapter:
                 event["steadyTimestamp"] += shift
 
     def _replace_session(self, data, game_id, old_start, new_start,
-                         duration):
+                         duration, session_id=None):
         """Move/resize one existing group without rebuilding its event list."""
-        title = self._find_title(data, game_id)
-        if title is None:
-            raise AdapterOperationError(
-                f"Could not find title {game_id!r} in "
-                f"'{self.display_name}'.")
-        old_ts = _parse_dt(old_start)
+        if session_id is not None:
+            found = self._find_session_by_id(data, session_id)
+            if found is None:
+                raise AdapterOperationError(
+                    f"Session {session_id!r} no longer exists in "
+                    f"'{self.display_name}'.")
+            _user_name, title, group = found
+            events = title.setdefault("events", [])
+            group_start = self._group_start_index(events, group)
+            group_end = group_start + len(group)
+            old_ts = group[0].get("clockTimestamp")
+            if not isinstance(old_ts, int):
+                raise AdapterOperationError(
+                    "The selected session has no valid Launched timestamp.")
+        else:
+            title = self._find_title(data, game_id)
+            if title is None:
+                raise AdapterOperationError(
+                    f"Could not find title {game_id!r} in "
+                    f"'{self.display_name}'.")
+            old_ts = _parse_dt(old_start)
+            events = title.setdefault("events", [])
+            group_start = None
+            for index, event in enumerate(events):
+                if (event.get("type") == "Launched"
+                        and event.get("clockTimestamp") == old_ts):
+                    group_start = index
+                    break
+            if group_start is None:
+                raise AdapterOperationError(
+                    f"No session starts at {old_start!r} in "
+                    f"'{self.display_name}'.")
+            group_end = group_start + 1
+            while (group_end < len(events)
+                   and events[group_end].get("type") not in
+                   ("Launched", "Closed")):
+                group_end += 1
+            if (group_end < len(events)
+                    and events[group_end].get("type") == "Closed"):
+                group_end += 1
+            group = events[group_start:group_end]
         new_ts = _parse_dt(new_start)
-        events = title.setdefault("events", [])
-        group_start = None
-        for index, event in enumerate(events):
-            if (event.get("type") == "Launched"
-                    and event.get("clockTimestamp") == old_ts):
-                group_start = index
-                break
-        if group_start is None:
-            raise AdapterOperationError(
-                f"No session starts at {old_start!r} in "
-                f"'{self.display_name}'.")
-        group_end = group_start + 1
-        while (group_end < len(events)
-               and events[group_end].get("type") not in ("Launched", "Closed")):
-            group_end += 1
-        if group_end < len(events) and events[group_end].get("type") == "Closed":
-            group_end += 1
-        group = events[group_start:group_end]
         delta = new_ts - old_ts
         for event in group:
             clock = event.get("clockTimestamp")
@@ -607,13 +678,23 @@ class NXALGameTrackerAdapter:
         events[:] = sort_events(events)
         self._recompute_title(data, title)
 
-    def update_session(self, game_id, duration, new_start, old_start):
+    def update_session(self, game_id, duration, new_start, old_start,
+                       session_id=None):
         data = copy.deepcopy(self._load())
-        self._replace_session(data, game_id, old_start, new_start, duration)
+        self._replace_session(
+            data, game_id, old_start, new_start, duration,
+            session_id=session_id)
         self._save(data)
 
-    def delete_session(self, original_date_time):
+    def delete_session(self, original_date_time, session_id=None):
         data = copy.deepcopy(self._load())
+        if session_id is not None:
+            if not self._remove_session_by_id(data, session_id):
+                raise AdapterOperationError(
+                    f"Session {session_id!r} no longer exists in "
+                    f"'{self.display_name}'.")
+            self._save(data)
+            return
         target = _parse_dt(original_date_time)
         found = False
         for _user_name, t in self._titles(data):
@@ -662,30 +743,46 @@ class NXALGameTrackerAdapter:
                                   session_id=None):
         """Close an incomplete group and add missing account attribution."""
         data = copy.deepcopy(self._load())
-        title = self._find_title(data, game_id)
-        if title is None:
-            raise AdapterOperationError(
-                f"Could not find title {game_id!r} in "
-                f"'{self.display_name}'.")
-        target = _parse_dt(date_time)
-        events = title.setdefault("events", [])
-        group_start = None
-        for index, event in enumerate(events):
-            if (event.get("type") == "Launched"
-                    and event.get("clockTimestamp") == target):
-                group_start = index
-                break
-        if group_start is None:
-            raise AdapterOperationError(
-                f"No session starts at {date_time!r} in "
-                f"'{self.display_name}'.")
-        group_end = group_start + 1
-        while (group_end < len(events)
-               and events[group_end].get("type") not in ("Launched", "Closed")):
-            group_end += 1
-        if group_end < len(events) and events[group_end].get("type") == "Closed":
+        if session_id is not None:
+            found = self._find_session_by_id(data, session_id)
+            if found is None:
+                raise AdapterOperationError(
+                    f"Session {session_id!r} no longer exists in "
+                    f"'{self.display_name}'.")
+            _user_name, title, group = found
+            events = title.setdefault("events", [])
+            group_start = self._group_start_index(events, group)
+            group_end = group_start + len(group)
+            target = group[0].get("clockTimestamp")
+            if not isinstance(target, int):
+                raise AdapterOperationError(
+                    "The selected session has no valid Launched timestamp.")
+        else:
+            title = self._find_title(data, game_id)
+            if title is None:
+                raise AdapterOperationError(
+                    f"Could not find title {game_id!r} in "
+                    f"'{self.display_name}'.")
+            target = _parse_dt(date_time)
+            events = title.setdefault("events", [])
+            group_start = None
+            for index, event in enumerate(events):
+                if (event.get("type") == "Launched"
+                        and event.get("clockTimestamp") == target):
+                    group_start = index
+                    break
+            if group_start is None:
+                raise AdapterOperationError(
+                    f"No session starts at {date_time!r} in "
+                    f"'{self.display_name}'.")
+            group_end = group_start + 1
+            while (group_end < len(events)
+                   and events[group_end].get("type") not in
+                   ("Launched", "Closed")):
+                group_end += 1
+            group = events[group_start:group_end]
+        if any(event.get("type") == "Closed" for event in group):
             return
-        group = events[group_start:group_end]
         next_clock = (events[group_end].get("clockTimestamp")
                       if group_end < len(events) else None)
         last_clock = max(
@@ -974,12 +1071,13 @@ class NXALGameTrackerAdapter:
                         "game_id": "nx_" + str(t["id"]),
                         "name": t.get("name", "Unknown"),
                         "native_user_id": self._user_id_for(user_name),
+                        "session_id": _session_id(user_name, t, group),
                     })
         return cands
 
     def apply_cleanup(self, sessions):
         for ref in sessions:
-            self.delete_session(ref.date_time)
+            self.delete_session(ref.date_time, session_id=ref.session_id)
 
     def get_sessions_chronological(self):
         return self.fetch_dashboard_data()[1]
@@ -990,15 +1088,26 @@ class NXALGameTrackerAdapter:
             return
         data = copy.deepcopy(self._load())
         for merge in merges:
-            primary_dt = merge.primary.date_time
+            primary_ref = merge.primary
+            primary_dt = primary_ref.date_time
             new_duration = float(merge.duration)
-            game_id = self._game_id_for_session(data, primary_dt)
+            if primary_ref.session_id is not None:
+                found = self._find_session_by_id(
+                    data, primary_ref.session_id)
+                if found is None:
+                    raise AdapterOperationError(
+                        f"Session {primary_ref.session_id!r} no longer "
+                        f"exists in '{self.display_name}'.")
+                game_id = "nx_" + str(found[1].get("id", ""))
+            else:
+                game_id = self._game_id_for_session(data, primary_dt)
             if game_id is None:
                 raise AdapterOperationError(
                     f"No session starts at {primary_dt} in "
                     f"'{self.display_name}'.")
             self._replace_session(
-                data, game_id, primary_dt, primary_dt, new_duration)
+                data, game_id, primary_dt, primary_dt, new_duration,
+                session_id=primary_ref.session_id)
             title = self._find_title(data, game_id)
             if title is None:
                 raise AdapterOperationError(
@@ -1006,8 +1115,13 @@ class NXALGameTrackerAdapter:
                     f"'{self.display_name}'.")
             events = title.setdefault("events", [])
             for ref in merge.absorbed:
-                if not self._remove_session_from_title(
-                        events, _parse_dt(ref.date_time)):
+                if ref.session_id is not None:
+                    removed = self._remove_session_by_id(
+                        data, ref.session_id)
+                else:
+                    removed = self._remove_session_from_title(
+                        events, _parse_dt(ref.date_time))
+                if not removed:
                     raise AdapterOperationError(
                         f"No session starts at {ref.date_time!r} in "
                         f"'{self.display_name}'.")
