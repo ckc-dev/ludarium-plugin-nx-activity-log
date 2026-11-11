@@ -14,6 +14,9 @@ From this plugin repository, with the host application checkout on `PYTHONPATH`:
 PYTHONPATH=/path/to/host python -m unittest discover -s tests -q
 ```
 
+For a full physical-console checklist starting from a blank Switch, see
+[`SWITCH_TEST_PLAN.md`](SWITCH_TEST_PLAN.md).
+
 ## Session model
 
 NXAL sessions are atomic `Launched…Closed` event groups, even when they cross
@@ -64,8 +67,9 @@ Tools use the selected NXAL environment path; there are no free-form path
 inputs. Fix/merge/deduplicate write in place and create `.bak` backups first.
 Fix sorts events and repairs summary first/last/playtime/launches. Merge and
 deduplicate intentionally recompute summary values from the resulting event
-stream. Multi-environment tools use the selected environment as their target
-and additional source environments from the environment selector.
+stream. Merge uses the selected environment as its target and writes the
+additional source environments into it; deduplicate rewrites the selected
+environment and every additional source environment in place.
 
 **Add play segment** adds credited focus time in an inactive gap. Pauses are
 the gaps between play segments, so moving or deleting a segment changes the
