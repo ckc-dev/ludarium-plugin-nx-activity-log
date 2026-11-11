@@ -1416,10 +1416,13 @@ class NXALGameTrackerAdapter:
         data = self._load()
         for user_name, user, t in self._titles_with_users(data):
             for group in _title_session_pairs([t]):
+                start_ts = group[0].get("clockTimestamp")
+                if not isinstance(start_ts, int):
+                    continue
                 duration = calculate_playtime(group)
                 if duration < threshold_seconds:
                     cands.append({
-                        "date_time": format_timestamp(group[0]["clockTimestamp"]),
+                        "date_time": format_timestamp(start_ts),
                         "duration": duration,
                         "game_id": "nx_" + str(t["id"]),
                         "name": t.get("name", "Unknown"),
