@@ -20,17 +20,21 @@ import shutil
 import sys
 
 from nxal_codec import (
-    calculate_playtime,
-    count_launches,
-    deduplicate_events,
     find_duplicate_events,
     find_first_last_launch,
     find_orphaned_lost_focus,
-    first_last_from_events,
     format_timestamp,
     is_sorted,
     load_json,
+    sort_events,
     write_export_json,
+)
+from nxal_repair import (
+    find_invalid_event_fields,
+    remove_duplicate_events,
+    remove_invalid_events,
+    remove_orphaned_lost_focus,
+    summary_for_events,
 )
 
 FIX_WARNINGS = "--warnings" in sys.argv
@@ -62,16 +66,13 @@ def fix_focus_errors(events, title_name):
     if confirm != "y":
         return events, False
 
-    orphan_indices = set(indices)
-    fixed_events = [
-        ev for index, ev in enumerate(events) if index not in orphan_indices
-    ]
-    print(f"    + Removed {len(indices)} orphaned event(s)")
+    fixed_events, removed = remove_orphaned_lost_focus(events)
+    print(f"    + Removed {removed} orphaned event(s)")
     return fixed_events, True
 
 
 def fix_out_of_order(events):
-    """Sort events by clockTimestamp."""
+    """Sort events by clockTimestamp and steadyTimestamp."""
     print("\n  Events are not sorted by clockTimestamp")
     print("\n  Fix: Sort all events by clockTimestamp")
 
@@ -79,17 +80,14 @@ def fix_out_of_order(events):
     if confirm != "y":
         return events, False
 
-    events.sort(key=lambda e: e["clockTimestamp"])
-    print(f"    + Sorted {len(events)} events by clockTimestamp")
-    return events, True
+    sorted_events = sort_events(events)
+    print(f"    + Sorted {len(sorted_events)} events by clockTimestamp")
+    return sorted_events, True
 
 
-# Removal uses the strict 3-field NXAL identity key (same as merge_exports).
 # find_duplicate_events below is only the broad 2-field *detection* heuristic
-# used to surface potential PDM artifacts to the user; actually deleting events
-# must require steadyTimestamp too, or we risk removing genuinely distinct
-# events (e.g. same wall-clock second across a reboot, differing in steady).
-REMOVE_DUP_KEY = ("type", "clockTimestamp", "steadyTimestamp")
+# used to surface potential PDM artifacts to the user; removal uses the shared
+# strict 3-field NXAL identity key in nxal_repair.remove_duplicate_events.
 
 
 def fix_duplicate_events(events):
@@ -104,10 +102,8 @@ def fix_duplicate_events(events):
         return events, False
 
     # Detect what WOULD be flagged by the broad key, then compute how many
-    # are truly removable under the strict key (keeps first occurrence).
-    pre_count = len(events)
-    fixed_events = deduplicate_events(events, REMOVE_DUP_KEY)
-    removed = pre_count - len(fixed_events)
+    # are truly removable under the shared strict key (keeps first occurrence).
+    fixed_events, removed = remove_duplicate_events(events)
 
     print(f"\n  Found {len(duplicates)} potential duplicate event(s) (PDM artifact):")
     for idx, _, ev in duplicates[:5]:
@@ -136,49 +132,43 @@ def fix_duplicate_events(events):
 
 
 def find_null_fields(events):
-    """Find events with missing required fields."""
-    nulls = []
-
-    for i, ev in enumerate(events):
-        if not isinstance(ev.get("clockTimestamp"), int):
-            nulls.append((i, "clockTimestamp"))
-        elif not isinstance(ev.get("steadyTimestamp"), int):
-            nulls.append((i, "steadyTimestamp"))
-        elif not isinstance(ev.get("type"), str):
-            nulls.append((i, "type"))
-
-    return nulls
+    """Find events with invalid or missing required fields."""
+    return find_invalid_event_fields(events)
 
 
 def fix_null_fields(events):
-    """Remove events with null fields."""
+    """Remove events with invalid or missing required fields."""
     nulls = find_null_fields(events)
     if not nulls:
         return events, False
 
-    print(f"\n  Found {len(nulls)} event(s) with missing fields:")
+    print(f"\n  Found {len(nulls)} event(s) with invalid fields:")
     for idx, field in nulls[:5]:
         ev = events[idx]
-        print(f"    [{idx}] Missing '{field}' (type={ev.get('type', 'N/A')}, ts={ev.get('clockTimestamp', 'N/A')})")
+        if isinstance(ev, dict):
+            print(f"    [{idx}] Invalid '{field}' "
+                  f"(type={ev.get('type', 'N/A')}, "
+                  f"ts={ev.get('clockTimestamp', 'N/A')})")
+        else:
+            print(f"    [{idx}] Invalid event value: {ev!r}")
     if len(nulls) > 5:
         print(f"    ... and {len(nulls) - 5} more")
 
-    print("\n  Fix: Remove events with missing required fields")
+    print("\n  Fix: Remove events with invalid required fields")
 
     confirm = input("\n  Apply fix? [y/N]: ").strip().lower()
     if confirm != "y":
         return events, False
 
-    null_indices = set(idx for idx, _ in nulls)
-    fixed_events = [ev for i, ev in enumerate(events) if i not in null_indices]
-    print(f"    + Removed {len(null_indices)} event(s) with missing fields")
+    fixed_events, removed = remove_invalid_events(events)
+    print(f"    + Removed {removed} event(s) with invalid fields")
     return fixed_events, True
 
 
 def fix_launches(summary, events):
     """Recalculate launches count."""
     declared = summary.get("launches", 0)
-    actual = count_launches(events)
+    actual = summary_for_events(events)["launches"]
 
     if declared == actual:
         return summary, False
@@ -199,7 +189,7 @@ def fix_playtime(summary, events):
     """Recalculate playtime."""
     declared = summary.get("playtime", 0)
 
-    calc = calculate_playtime(events)
+    calc = summary_for_events(events)["playtime"]
 
     if declared == calc:
         return summary, False
@@ -225,7 +215,9 @@ def fix_first_last(summary, events):
     """Recalculate firstPlayed/lastPlayed from the event stream."""
     declared_first = summary.get("firstPlayed", 0)
     declared_last = summary.get("lastPlayed", 0)
-    first, last = first_last_from_events(events, 0, 0)
+    expected = summary_for_events(events)
+    first = expected["firstPlayed"]
+    last = expected["lastPlayed"]
     if declared_first == first and declared_last == last:
         return summary, False
 
@@ -311,6 +303,18 @@ def main():
             while changed:
                 changed = False
 
+                # Remove invalid events before sorting/detecting focus, so a
+                # missing timestamp cannot break is_sorted() and an unknown
+                # type is never treated as a real event.
+                nulls = find_null_fields(events)
+                if nulls:
+                    events, fixed = fix_null_fields(events)
+                    if fixed:
+                        title_fixes += 1
+                        fixes_applied += 1
+                        changed = True
+                        continue
+
                 if FIX_WARNINGS and not is_sorted(events):
                     events, fixed = fix_out_of_order(events)
                     if fixed:
@@ -338,15 +342,6 @@ def main():
                             fixes_applied += 1
                             changed = True
                             continue
-
-                nulls = find_null_fields(events)
-                if nulls:
-                    events, fixed = fix_null_fields(events)
-                    if fixed:
-                        title_fixes += 1
-                        fixes_applied += 1
-                        changed = True
-                        continue
 
                 summary, fixed_launches = fix_launches(summary, events)
                 if fixed_launches:

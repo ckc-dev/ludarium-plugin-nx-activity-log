@@ -6,22 +6,14 @@ import shutil
 from contextlib import redirect_stdout
 
 from nxal_codec import (
-    VALID_EVENT_TYPES,
     VerificationResult,
-    calculate_playtime,
-    count_launches,
-    deduplicate_events,
     find_duplicate_events,
-    find_orphaned_lost_focus,
-    first_last_from_events,
     load_json,
-    sort_events,
     write_export_json,
 )
+from nxal_repair import repair_export, summary_for_events
 
 from . import deduplicate_exports, merge_exports, validate_import, verify_import
-
-EVENT_IDENTITY_KEY = ('type', 'clockTimestamp', 'steadyTimestamp')
 
 
 def _path(params, ctx):
@@ -65,12 +57,12 @@ def verify_export(params, ctx):
         return {'ok': False, 'message': error, 'lines': []}
     users = data.get('users', [])
     titles = sum(len(user.get('titles', [])) for user in users)
-    launches = sum(
-        count_launches(title.get('events', []))
-        for user in users for title in user.get('titles', []))
-    minutes = sum(
-        calculate_playtime(title.get('events', []))
-        for user in users for title in user.get('titles', [])) / 60.0
+    summary = [
+        summary_for_events(title.get('events', []))
+        for user in users for title in user.get('titles', [])
+    ]
+    launches = sum(item['launches'] for item in summary)
+    minutes = sum(item['playtime'] for item in summary) / 60.0
     duplicate_events = sum(
         len(find_duplicate_events(title.get('events', [])))
         for user in users for title in user.get('titles', []))
@@ -136,35 +128,6 @@ def verify_imported_data(params, ctx):
     }
 
 
-def _repair_events(events):
-    """Remove invalid/duplicate/orphan events and return (events, count)."""
-    removed = 0
-    cleaned = []
-    for event in events:
-        if (event.get('type') not in VALID_EVENT_TYPES
-                or not isinstance(event.get('clockTimestamp'), int)
-                or not isinstance(event.get('steadyTimestamp'), int)):
-            removed += 1
-            continue
-        cleaned.append(event)
-
-    before = len(cleaned)
-    cleaned = deduplicate_events(cleaned, EVENT_IDENTITY_KEY)
-    removed += before - len(cleaned)
-
-    # Sort before detecting orphan focus: a deliberately out-of-order file
-    # must not make a valid Gained/Lost pair look orphaned.
-    cleaned = sort_events(cleaned)
-    orphaned = set(find_orphaned_lost_focus(cleaned))
-    if orphaned:
-        cleaned = [
-            event for index, event in enumerate(cleaned)
-            if index not in orphaned
-        ]
-        removed += len(orphaned)
-    return cleaned, removed
-
-
 def fix_export(params, ctx):
     """Repair the selected export in place, with a .bak backup.
 
@@ -184,30 +147,18 @@ def fix_export(params, ctx):
             'lines': [],
         }
 
-    removed = 0
-    changed_titles = 0
-    users = data.get('users', [])
-    for user in users:
-        for title in user.get('titles', []):
-            events, title_removed = _repair_events(
-                title.get('events', []))
-            removed += title_removed
-            title['events'] = events
-            first, last = first_last_from_events(events, 0, 0)
-            summary = title.setdefault('summary', {})
-            summary['firstPlayed'] = first
-            summary['lastPlayed'] = last
-            summary['playtime'] = calculate_playtime(events)
-            summary['launches'] = count_launches(events)
-            changed_titles += 1
+    stats = repair_export(data)
     write_export_json(path, data)
     return {
         'ok': True,
         'message': f"Repaired {path}",
         'lines': [
             f"Backup: {path}.bak",
-            f"Titles updated: {changed_titles}",
-            f"Events removed: {removed}",
+            f"Titles updated: {stats['titles']}",
+            f"Events removed: {stats['events_removed']}",
+            f"  Invalid: {stats['invalid']}",
+            f"  Duplicates: {stats['duplicates']}",
+            f"  Orphan focus: {stats['orphans']}",
             'Events sorted and summary timestamps repaired.',
         ],
     }
