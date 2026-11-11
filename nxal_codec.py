@@ -25,6 +25,11 @@ VALID_EVENT_TYPES = set(EVENT_TYPE_MAP.keys())
 
 SUMMARY_FIELDS = ["firstPlayed", "lastPlayed", "launches", "playtime"]
 
+# NXAL deduplicates events on import/merge by
+# (type, titleID, eventType, clockTimestamp, steadyTimestamp). titleID/type are
+# matched at the title/user level, so this is the shared per-event identity.
+EVENT_IDENTITY_KEY = ("type", "clockTimestamp", "steadyTimestamp")
+
 USER_ID_HEX_LENGTH = 32
 GAME_ID_HEX_LENGTH = 16
 
