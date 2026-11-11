@@ -67,6 +67,12 @@ def focus_spans(events):
     when steady time is unavailable or a reboot made it non-monotonic. Keeping
     the credited duration here also gives callers the active intervals needed
     to place play correctly across hours, calendar days and midnight.
+
+    Each Gained Focus is paired with at most one Lost Focus. NXAL's
+    countPlaytime() can add an extra account-separated orphan OutFocus using
+    the previous focus start; that is a logging artifact, so the adapter
+    reports it through the session warning/Fix path instead of reproducing
+    the double count here.
     """
     spans = []
     start_steady = None
@@ -131,18 +137,30 @@ def find_duplicate_events(events):
 def find_orphaned_lost_focus(events):
     """Find indices of 'Lost Focus' events without a preceding 'Gained Focus'.
 
-    PDM artifact. Returns a list of event indices.
+    Consecutive OutFocus events are a known PDM logging artifact; NXAL's
+    getPlayEvents() explicitly skips a Lost Focus whose immediate predecessor
+    is another Lost Focus, so those are not reported as orphans. A Lost Focus
+    separated from the previous one by an account event (or without any focus
+    start) is the malformed case this detector is meant to surface.
+
+    Launched/Closed boundaries reset the focus depth so an open focus pair in
+    one session cannot mask an orphan in the next.
     """
     orphans = []
     depth = 0
+    previous_type = None
     for i, ev in enumerate(events):
-        if ev["type"] == "Gained Focus":
+        event_type = ev.get("type")
+        if event_type in ("Launched", "Closed"):
+            depth = 0
+        elif event_type == "Gained Focus":
             depth += 1
-        elif ev["type"] == "Lost Focus":
+        elif event_type == "Lost Focus":
             if depth > 0:
                 depth -= 1
-            else:
+            elif previous_type != "Lost Focus":
                 orphans.append(i)
+        previous_type = event_type
     return orphans
 
 
@@ -329,11 +347,12 @@ class VerificationResult:
 
 
 def _title_session_pairs(titles):
-    """Yield (user_name, title, event_group) for every Launched…Closed group.
+    """Yield (user_name, title, event_group) for every native session group.
 
     A group opens at a "Launched" event and closes at the next "Closed"
-    event. If a title ends without a "Closed" (crash), the group is still
-    emitted using the remaining events (duration may be partial).
+    event. If a title ends without a "Closed" (crash), or a new Launched
+    arrives first, the incomplete group is still emitted using the remaining
+    events so the host can warn and repair it.
     """
     for t in titles:
         group = []

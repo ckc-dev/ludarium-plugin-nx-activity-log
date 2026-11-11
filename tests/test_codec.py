@@ -30,6 +30,22 @@ class TestNxalCodec(unittest.TestCase):
         self.assertEqual(nxal_codec.count_launches(events), 1)
         self.assertEqual(nxal_codec.calculate_playtime(events), 3)
         self.assertEqual(nxal_codec.find_orphaned_lost_focus(events), [])
+        repeated_out = [
+            {'type': 'Launched', 'clockTimestamp': 1,
+             'steadyTimestamp': 1},
+            {'type': 'Gained Focus', 'clockTimestamp': 2,
+             'steadyTimestamp': 2},
+            {'type': 'Lost Focus', 'clockTimestamp': 5,
+             'steadyTimestamp': 5},
+            {'type': 'Lost Focus', 'clockTimestamp': 5,
+             'steadyTimestamp': 5},
+            {'type': 'Account Logout', 'clockTimestamp': 6,
+             'steadyTimestamp': 6},
+            {'type': 'Lost Focus', 'clockTimestamp': 6,
+             'steadyTimestamp': 6},
+        ]
+        self.assertEqual(
+            nxal_codec.find_orphaned_lost_focus(repeated_out), [5])
         self.assertTrue(nxal_codec.is_sorted(events))
         self.assertEqual(
             nxal_codec.event_key(events[0], ('type', 'clockTimestamp')),

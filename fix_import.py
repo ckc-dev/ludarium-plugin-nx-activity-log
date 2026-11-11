@@ -36,43 +36,36 @@ FIX_WARNINGS = "--warnings" in sys.argv
 
 
 def fix_focus_errors(events, title_name):
-    """Fix unbalanced focus events by inserting missing Gained Focus."""
+    """Remove orphaned Lost Focus events.
+
+    Consecutive OutFocus events are accepted as a known PDM artifact by
+    NXAL's getPlayEvents(); a Lost Focus separated by an account event (or
+    with no preceding focus at all) is malformed. Removing it avoids
+    inventing a fake Gained Focus and avoids NXAL countPlaytime() adding an
+    extra burst from the previous focus start.
+    """
     indices = find_orphaned_lost_focus(events)
     if not indices:
         return events, False
 
-    print(f"\n  Found {len(indices)} 'Lost Focus' event(s) without preceding 'Gained Focus':")
+    print(f"\n  Found {len(indices)} orphaned 'Lost Focus' event(s):")
     for idx in indices[:5]:
         ev = events[idx]
         print(f"    [{idx}] Lost Focus at {format_timestamp(ev['clockTimestamp'])} ({ev['clockTimestamp']})")
     if len(indices) > 5:
         print(f"    ... and {len(indices) - 5} more")
 
-    print("\n  Fix: Insert 'Gained Focus' before each orphaned 'Lost Focus'")
-    print("       Timestamp: previous event timestamp + 1 second")
+    print("\n  Fix: Remove each orphaned 'Lost Focus' event")
 
     confirm = input("\n  Apply fix? [y/N]: ").strip().lower()
     if confirm != "y":
         return events, False
 
-    fixed_events = []
-    last_focus_type = None
-
-    for i, ev in enumerate(events):
-        if ev["type"] == "Lost Focus" and last_focus_type != "Gained Focus":
-            insert_ts = events[i - 1]["clockTimestamp"] + 1 if i > 0 else ev["clockTimestamp"] - 1
-            insert_steady = events[i - 1]["steadyTimestamp"] + 1 if i > 0 else ev["steadyTimestamp"] - 1
-
-            fixed_events.append({
-                "clockTimestamp": insert_ts,
-                "steadyTimestamp": insert_steady,
-                "type": "Gained Focus"
-            })
-            print(f"    + Inserted Gained Focus at {format_timestamp(insert_ts)} ({insert_ts})")
-
-        fixed_events.append(ev)
-        last_focus_type = ev["type"]
-
+    orphan_indices = set(indices)
+    fixed_events = [
+        ev for index, ev in enumerate(events) if index not in orphan_indices
+    ]
+    print(f"    + Removed {len(indices)} orphaned event(s)")
     return fixed_events, True
 
 

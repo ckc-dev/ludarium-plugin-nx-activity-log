@@ -234,6 +234,271 @@ class NxalSessionTest(unittest.TestCase):
             ['Launched', 'Gained Focus', 'Account Login', 'Lost Focus',
              'Account Logout', 'Closed'])
 
+    def test_parts_are_scoped_to_the_exact_native_session(self):
+        same_start = int(datetime(2026, 1, 9, 10, 0, 0).timestamp())
+        events = _complete_events(start=same_start, duration=100)
+        data = _payload()
+        data['users'] = [
+            {
+                'id': 'A' * 32,
+                'name': 'Alice',
+                'titles': [{
+                    'id': TITLE_ID,
+                    'name': 'Game',
+                    'summary': {},
+                    'events': json.loads(json.dumps(events)),
+                }],
+            },
+            {
+                'id': 'B' * 32,
+                'name': 'Bob',
+                'titles': [{
+                    'id': TITLE_ID,
+                    'name': 'Game',
+                    'summary': {},
+                    'events': json.loads(json.dumps(events)),
+                }],
+            },
+        ]
+        path, adapter = self._adapter(data)
+        rows = adapter.fetch_dashboard_data()[1]
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(len({row['session_id'] for row in rows}), 2)
+        target = rows[1]
+        parts = adapter.get_session_parts(
+            target['game_id'], target['date_time'],
+            session_id=target['session_id'])
+        self.assertEqual(len(parts), 1)
+        self.assertEqual(parts[0]['duration'], 100)
+        # Date-only lookup must not guess between two native profiles.
+        self.assertEqual(adapter.get_session_parts(
+            target['game_id'], target['date_time']), [])
+        adapter.update_session_part(
+            parts[0]['part_id'], 80, parts[0]['start_time'],
+            parts[0]['start_time'])
+        with self.assertRaises(AdapterOperationError):
+            adapter.add_session_part(
+                target['game_id'],
+                (datetime.fromtimestamp(same_start)
+                 + timedelta(seconds=83)).strftime('%Y-%m-%d %H:%M:%S'),
+                1)
+        adapter.add_session_part(
+            target['game_id'],
+            (datetime.fromtimestamp(same_start)
+             + timedelta(seconds=83)).strftime('%Y-%m-%d %H:%M:%S'),
+            1, session_id=target['session_id'])
+        refreshed = adapter.fetch_dashboard_data()[1]
+        by_id = {row['session_id']: row for row in refreshed}
+        self.assertEqual(by_id[target['session_id']]['duration'], 81)
+        untargeted = next(
+            row for row in refreshed if row['session_id'] != target['session_id'])
+        self.assertEqual(untargeted['duration'], 100)
+
+    def test_session_id_survives_profile_rename(self):
+        path, adapter = self._adapter()
+        before = adapter.fetch_dashboard_data()[1][0]
+        data = adapter._load()
+        data['users'][0]['name'] = 'Alice Renamed'
+        adapter._save(data)
+        after = adapter.fetch_dashboard_data()[1][0]
+        self.assertEqual(after['session_id'], before['session_id'])
+
+    def test_incomplete_segment_edit_cannot_overlap_the_next_session(self):
+        start = int(datetime(2026, 1, 10, 10, 0, 0).timestamp())
+        events = [
+            {'type': 'Launched', 'clockTimestamp': start,
+             'steadyTimestamp': 100},
+            {'type': 'Gained Focus', 'clockTimestamp': start + 2,
+             'steadyTimestamp': 102},
+            {'type': 'Lost Focus', 'clockTimestamp': start + 12,
+             'steadyTimestamp': 112},
+            {'type': 'Launched', 'clockTimestamp': start + 30,
+             'steadyTimestamp': 130},
+            {'type': 'Gained Focus', 'clockTimestamp': start + 32,
+             'steadyTimestamp': 132},
+            {'type': 'Account Login', 'clockTimestamp': start + 33,
+             'steadyTimestamp': 133},
+            {'type': 'Lost Focus', 'clockTimestamp': start + 82,
+             'steadyTimestamp': 182},
+            {'type': 'Account Logout', 'clockTimestamp': start + 83,
+             'steadyTimestamp': 183},
+            {'type': 'Closed', 'clockTimestamp': start + 85,
+             'steadyTimestamp': 185},
+        ]
+        path, adapter = self._adapter(_payload(events))
+        row = next(r for r in adapter.fetch_dashboard_data()[1]
+                   if r['date_time'] == datetime.fromtimestamp(
+                       start).strftime('%Y-%m-%d %H:%M:%S'))
+        parts = adapter.get_session_parts(
+            'nx_' + TITLE_ID, row['date_time'],
+            session_id=row['session_id'])
+        with open(path, 'rb') as handle:
+            before = handle.read()
+        with self.assertRaises(AdapterOperationError):
+            adapter.update_session_part(
+                parts[0]['part_id'], 100, parts[0]['start_time'],
+                parts[0]['start_time'])
+        with open(path, 'rb') as handle:
+            self.assertEqual(handle.read(), before)
+
+    def test_legacy_date_delete_stops_before_the_next_session(self):
+        start = int(datetime(2026, 1, 11, 10, 0, 0).timestamp())
+        events = [
+            {'type': 'Launched', 'clockTimestamp': start,
+             'steadyTimestamp': 100},
+            {'type': 'Gained Focus', 'clockTimestamp': start + 2,
+             'steadyTimestamp': 102},
+            {'type': 'Lost Focus', 'clockTimestamp': start + 12,
+             'steadyTimestamp': 112},
+            {'type': 'Launched', 'clockTimestamp': start + 30,
+             'steadyTimestamp': 130},
+            {'type': 'Gained Focus', 'clockTimestamp': start + 32,
+             'steadyTimestamp': 132},
+            {'type': 'Account Login', 'clockTimestamp': start + 33,
+             'steadyTimestamp': 133},
+            {'type': 'Lost Focus', 'clockTimestamp': start + 82,
+             'steadyTimestamp': 182},
+            {'type': 'Account Logout', 'clockTimestamp': start + 83,
+             'steadyTimestamp': 183},
+            {'type': 'Closed', 'clockTimestamp': start + 85,
+             'steadyTimestamp': 185},
+        ]
+        path, adapter = self._adapter(_payload(events))
+        adapter.delete_session(datetime.fromtimestamp(
+            start).strftime('%Y-%m-%d %H:%M:%S'))
+        rows = adapter.fetch_dashboard_data()[1]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['duration'], 50)
+        title = adapter._load()['users'][0]['titles'][0]
+        self.assertEqual(
+            [event['type'] for event in title['events']],
+            ['Launched', 'Gained Focus', 'Account Login', 'Lost Focus',
+             'Account Logout', 'Closed'])
+
+    def test_account_events_are_preserved_when_editing_segments(self):
+        start = int(datetime(2026, 1, 12, 10, 0, 0).timestamp())
+        events = [
+            {'type': 'Launched', 'clockTimestamp': start,
+             'steadyTimestamp': 100},
+            {'type': 'Gained Focus', 'clockTimestamp': start + 2,
+             'steadyTimestamp': 102},
+            {'type': 'Lost Focus', 'clockTimestamp': start + 22,
+             'steadyTimestamp': 122},
+            {'type': 'Gained Focus', 'clockTimestamp': start + 30,
+             'steadyTimestamp': 150},
+            {'type': 'Account Login', 'clockTimestamp': start + 31,
+             'steadyTimestamp': 151},
+            {'type': 'Lost Focus', 'clockTimestamp': start + 60,
+             'steadyTimestamp': 180},
+            {'type': 'Account Logout', 'clockTimestamp': start + 61,
+             'steadyTimestamp': 181},
+            {'type': 'Closed', 'clockTimestamp': start + 62,
+             'steadyTimestamp': 182},
+        ]
+        path, adapter = self._adapter(_payload(events))
+        row = adapter.fetch_dashboard_data()[1][0]
+        parts = adapter.get_session_parts(
+            'nx_' + TITLE_ID, row['date_time'],
+            session_id=row['session_id'])
+        before = [
+            event for event in adapter._load()['users'][0]['titles'][0]['events']
+            if event['type'] in ('Account Login', 'Account Logout')]
+        adapter.update_session_part(
+            parts[0]['part_id'], 25, parts[0]['start_time'],
+            parts[0]['start_time'])
+        after = [
+            event for event in adapter._load()['users'][0]['titles'][0]['events']
+            if event['type'] in ('Account Login', 'Account Logout')]
+        self.assertEqual(after, before)
+
+    def test_summary_first_last_are_preserved_on_edit(self):
+        path, adapter = self._adapter()
+        data = adapter._load()
+        title = data['users'][0]['titles'][0]
+        title['summary']['firstPlayed'] = 1234
+        title['summary']['lastPlayed'] = 5678
+        adapter._save(data)
+        row = adapter.fetch_dashboard_data()[1][0]
+        parts = adapter.get_session_parts(
+            'nx_' + TITLE_ID, row['date_time'],
+            session_id=row['session_id'])
+        adapter.update_session_part(
+            parts[0]['part_id'], 80, parts[0]['start_time'],
+            parts[0]['start_time'])
+        summary = adapter._load()['users'][0]['titles'][0]['summary']
+        self.assertEqual(summary['firstPlayed'], 1234)
+        self.assertEqual(summary['lastPlayed'], 5678)
+        self.assertEqual(summary['playtime'], 80)
+
+    def test_orphan_lost_focus_warns_and_repairs(self):
+        start = int(datetime(2026, 1, 13, 10, 0, 0).timestamp())
+        events = [
+            {'type': 'Launched', 'clockTimestamp': start,
+             'steadyTimestamp': 100},
+            {'type': 'Gained Focus', 'clockTimestamp': start + 2,
+             'steadyTimestamp': 102},
+            {'type': 'Account Login', 'clockTimestamp': start + 3,
+             'steadyTimestamp': 103},
+            {'type': 'Lost Focus', 'clockTimestamp': start + 12,
+             'steadyTimestamp': 112},
+            {'type': 'Account Logout', 'clockTimestamp': start + 13,
+             'steadyTimestamp': 113},
+            {'type': 'Lost Focus', 'clockTimestamp': start + 13,
+             'steadyTimestamp': 113},
+            {'type': 'Closed', 'clockTimestamp': start + 15,
+             'steadyTimestamp': 115},
+        ]
+        path, adapter = self._adapter(_payload(events))
+        row = adapter.fetch_dashboard_data()[1][0]
+        self.assertTrue(row['repair_available'])
+        self.assertIn('Malformed focus sequence', row['session_warning'])
+        adapter.repair_incomplete_session(
+            'nx_' + TITLE_ID, row['date_time'], session_id=row['session_id'])
+        repaired = adapter.fetch_dashboard_data()[1][0]
+        self.assertFalse(repaired['repair_available'])
+        self.assertEqual(repaired['session_warning'], '')
+        types = [event['type'] for event in
+                 adapter._load()['users'][0]['titles'][0]['events']]
+        self.assertEqual(types.count('Lost Focus'), 1)
+
+    def test_invalid_account_event_warns_and_repairs(self):
+        start = int(datetime(2026, 1, 14, 10, 0, 0).timestamp())
+        events = [
+            {'type': 'Launched', 'clockTimestamp': start,
+             'steadyTimestamp': 100},
+            {'type': 'Gained Focus', 'clockTimestamp': start + 2,
+             'steadyTimestamp': 102},
+            {'type': 'Account Login', 'clockTimestamp': start + 3},
+            {'type': 'Lost Focus', 'clockTimestamp': start + 12,
+             'steadyTimestamp': 112},
+            {'type': 'Account Logout', 'clockTimestamp': start + 13,
+             'steadyTimestamp': 113},
+            {'type': 'Closed', 'clockTimestamp': start + 15,
+             'steadyTimestamp': 115},
+        ]
+        path, adapter = self._adapter(_payload(events))
+        row = adapter.fetch_dashboard_data()[1][0]
+        self.assertIn('Malformed account event', row['session_warning'])
+        adapter.repair_incomplete_session(
+            'nx_' + TITLE_ID, row['date_time'], session_id=row['session_id'])
+        repaired = adapter.fetch_dashboard_data()[1][0]
+        self.assertFalse(repaired['repair_available'])
+        self.assertNotIn(
+            'Malformed account event', repaired['session_warning'])
+        types = [event['type'] for event in
+                 adapter._load()['users'][0]['titles'][0]['events']]
+        self.assertNotIn('Account Login', types)
+
+    def test_add_game_requires_a_console_user_profile(self):
+        path, adapter = self._adapter(_payload([]))
+        data = adapter._load()
+        data['users'] = []
+        adapter._save(data)
+        with self.assertRaises(AdapterOperationError):
+            adapter.add_game('nx_' + TITLE_ID, 'Game')
+        with self.assertRaises(AdapterOperationError):
+            adapter.add_session('nx_' + TITLE_ID, '2026-01-14T10:00:00', 60)
+
     def test_segment_edits_reject_overlap_and_boundary_escape(self):
         path, adapter = self._adapter(_payload([]))
         game_id = 'nx_' + TITLE_ID
@@ -381,6 +646,40 @@ class NxalSessionTest(unittest.TestCase):
         self.assertEqual(title['summary']['playtime'], 100)
         self.assertEqual(title['summary']['launches'], 1)
 
+    def test_fix_export_removes_orphan_focus_and_preserves_summary_pair(self):
+        start = int(datetime(2026, 1, 15, 10, 0, 0).timestamp())
+        events = [
+            {'type': 'Launched', 'clockTimestamp': start,
+             'steadyTimestamp': 100},
+            {'type': 'Gained Focus', 'clockTimestamp': start + 2,
+             'steadyTimestamp': 102},
+            {'type': 'Account Login', 'clockTimestamp': start + 3,
+             'steadyTimestamp': 103},
+            {'type': 'Lost Focus', 'clockTimestamp': start + 12,
+             'steadyTimestamp': 112},
+            {'type': 'Account Logout', 'clockTimestamp': start + 13,
+             'steadyTimestamp': 113},
+            {'type': 'Lost Focus', 'clockTimestamp': start + 13,
+             'steadyTimestamp': 113},
+            {'type': 'Closed', 'clockTimestamp': start + 15,
+             'steadyTimestamp': 115},
+        ]
+        data = _payload(events)
+        data['users'][0]['titles'][0]['summary'] = {
+            'firstPlayed': 111, 'lastPlayed': 222,
+            'playtime': 999, 'launches': 1,
+        }
+        path, _adapter = self._adapter(data)
+        result = plugin_tools.fix_import(
+            {'path': path}, type('Ctx', (), {'path': path})())
+        self.assertTrue(result['ok'])
+        title = nxal_codec.load_json(path)['users'][0]['titles'][0]
+        self.assertEqual(
+            nxal_codec.find_orphaned_lost_focus(title['events']), [])
+        self.assertEqual(title['summary']['firstPlayed'], 111)
+        self.assertEqual(title['summary']['lastPlayed'], 222)
+        self.assertEqual(title['summary']['playtime'], 10)
+
     def test_game_merge_candidates_are_scoped_to_one_user(self):
         path, adapter = self._adapter()
         data = adapter._load()
@@ -395,7 +694,12 @@ class NxalSessionTest(unittest.TestCase):
         adapter.apply_game_merges(
             candidates[0]['instances'][0]['game_id'],
             [candidates[0]['instances'][1]['game_id']])
-        self.assertEqual(len(adapter._load()['users'][0]['titles']), 1)
+        merged = adapter._load()['users'][0]['titles']
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(len(merged[0]['events']), 6)
+        sessions = adapter.fetch_dashboard_data()[1]
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0]['duration'], 100)
 
     def test_add_game_writes_a_durable_zero_summary(self):
         path, adapter = self._adapter()

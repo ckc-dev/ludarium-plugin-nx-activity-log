@@ -5,6 +5,7 @@ from nxal_codec import (
     count_launches,
     deduplicate_events,
     find_duplicate_events,
+    find_orphaned_lost_focus,
     first_last_from_events,
     load_json,
     sort_events,
@@ -43,7 +44,7 @@ def verify_export(params, ctx):
     lines = [f"File: {path}", f"Users: {len(users)}", f"Titles: {titles}",
              f"Launches: {launches}", f"Playtime: {minutes:.1f} min"]
     if dupes:
-        lines.append(f"WARN: {dupes} duplicate event group(s) present")
+        lines.append(f"WARN: {dupes} duplicate event(s) present")
     return {"ok": True, "message": "Export verified", "lines": lines}
 
 
@@ -55,7 +56,7 @@ def fix_import(params, ctx):
         data = load_json(path)
     except Exception as e:
         return {"ok": False, "message": f"Could not read file: {e}", "lines": []}
-    fixed = 0
+    removed_events = 0
     for u in data.get("users", []):
         for t in u.get("titles", []):
             evs = deduplicate_events(
@@ -63,7 +64,14 @@ def fix_import(params, ctx):
                 ("type", "clockTimestamp", "steadyTimestamp"))
             before = len(t.get("events", []))
             evs = sort_events(evs)
-            fixed += before - len(evs)
+            removed_events += before - len(evs)
+            orphaned = set(find_orphaned_lost_focus(evs))
+            if orphaned:
+                evs = [
+                    event for index, event in enumerate(evs)
+                    if index not in orphaned
+                ]
+                removed_events += len(orphaned)
             t["events"] = evs
             if not evs:
                 continue
@@ -71,12 +79,17 @@ def fix_import(params, ctx):
             first, last = first_last_from_events(
                 evs, summary.get("firstPlayed", 0),
                 summary.get("lastPlayed", 0))
-            summary["firstPlayed"] = first
-            summary["lastPlayed"] = last
+            # NXAL's firstPlayed/lastPlayed come from PDM, not events.
+            # Preserve existing non-zero values; fill only a missing pair.
+            if not summary.get("firstPlayed"):
+                summary["firstPlayed"] = first
+            if not summary.get("lastPlayed"):
+                summary["lastPlayed"] = last
             summary["playtime"] = calculate_playtime(evs)
             summary["launches"] = count_launches(evs)
     write_export_json(path, data)
-    return {"ok": True, "message": f"Rewrote {path} (removed {fixed} dup events)",
+    return {"ok": True,
+            "message": f"Rewrote {path} (removed {removed_events} event(s))",
             "lines": []}
 
 

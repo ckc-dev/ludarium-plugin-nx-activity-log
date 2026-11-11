@@ -8,9 +8,11 @@ Discovery contract (host reads these module attributes):
 
 Live read/write over a single NXAL import.json export. Sessions are
 Launched..Closed event groups per (user,title) mirroring NXAL getPDSessions;
-playtime from Gained/Lost Focus steady pairs via nxal_codec.calculate_playtime;
-game ids are ``nx_<title-id>``; every mutation is written back byte-compatibly
-through nxal_codec.write_export_json.
+trailing incomplete groups are exposed for repair. Playtime comes from
+Gained/Lost Focus steady pairs via nxal_codec.calculate_playtime; game ids are
+``nx_<title-id>``; every mutation is written back byte-compatibly through
+nxal_codec.write_export_json. Session parts are user-scoped logical play
+segments, not raw events.
 """
 
 import os

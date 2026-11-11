@@ -12,8 +12,8 @@ Checks:
   - All event type strings are valid
   - Timestamps are reasonable Unix values (2017-2030)
   - firstPlayed <= lastPlayed for each title
-  - firstPlayed == earliest event clockTimestamp
-  - lastPlayed == latest event clockTimestamp
+  - firstPlayed usually matches the first "Account Login" event
+  - lastPlayed usually matches the last "Lost Focus" event (PDM can differ)
   - Events sorted by clockTimestamp (non-decreasing)
   - launches == count of "Launched" events
   - playtime consistent with focus event pairs (warn if >5% off)
