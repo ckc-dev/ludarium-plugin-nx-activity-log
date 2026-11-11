@@ -7,6 +7,7 @@ Live read/write tracker adapter for NX-ActivityLog import/export files.
 - Plugin API: 2
 - Adapter: `adapter.py`
 - Event/export codec: `nxal_codec.py`
+- Shared repair/summary helpers: `nxal_repair.py`
 
 From this plugin repository, with the host application checkout on `PYTHONPATH`:
 
