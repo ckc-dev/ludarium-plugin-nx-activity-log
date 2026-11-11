@@ -32,6 +32,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from nxal_codec import (
+    EVENT_IDENTITY_KEY,
     VALID_EVENT_TYPES,
     _all_anchors,
     _anchor_for,
@@ -42,6 +43,7 @@ from nxal_codec import (
     calculate_playtime,
     count_launches,
     deduplicate_events,
+    event_key,
     find_orphaned_lost_focus,
     first_last_from_events,
     focus_intervals,
@@ -80,15 +82,10 @@ def _group_active_segments(group):
 
 def _group_fingerprint(group):
     """Exact native event identity, used to detect duplicate groups."""
-    return tuple(
-        (event.get("type"), event.get("clockTimestamp"),
-         event.get("steadyTimestamp"))
-        for event in group
-    )
+    return tuple(event_key(event, EVENT_IDENTITY_KEY) for event in group)
 
 
 ACCOUNT_EVENT_TYPES = frozenset({"Account Login", "Account Logout"})
-EVENT_IDENTITY_KEY = ("type", "clockTimestamp", "steadyTimestamp")
 
 
 def _valid_account_events(group, start_ts):
