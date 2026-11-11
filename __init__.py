@@ -30,21 +30,15 @@ PLUGIN_AUTHOR = "Ludarium"
 PLUGIN_DESCRIPTION = "Live read/write adapter over an NXAL import.json export"
 PLUGIN_API_VERSION = 2
 
-PLUGIN_CONFIG_SCHEMA = [
-    {
-        "key": "profile_mapping",
-        "label": "Profile mapping (JSON)",
-        "type": "text",
-        "default": "{}",
-        "help": ("Map NXAL profile/user name -> Ludarium user id as a JSON "
-                 "object, e.g. {\"Grog\": 1}. Unmapped profiles use the "
-                 "environment's default user."),
-    },
-]
+# Profile-to-user bindings live in the host environment_profiles table.
+# There are currently no scalar plugin config fields.
+PLUGIN_CONFIG_SCHEMA = []
 
 from . import adapter  # noqa: E402
+from .profiles import list_profiles  # noqa: E402
 
 PLUGIN_ADAPTER_CLASS = adapter.NXALGameTrackerAdapter
+PLUGIN_PROFILE_PROVIDER = list_profiles
 
 
 def _import_advanced():

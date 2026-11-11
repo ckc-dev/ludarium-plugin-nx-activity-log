@@ -38,12 +38,17 @@ class TestPluginContext(unittest.TestCase):
             'name': 'NXAL',
             'type': 'nx_activity_log',
             'path': '/tmp/import.json',
-            'config': {'profile_mapping': '{"Alice": 1}'},
+            'config': {'profile_bindings': [{
+                'profile_key': 'A' * 32,
+                'profile_name': 'Alice',
+                'user_id': 1,
+            }]},
         }
         clone = ctx.clone_with_environment(environment)
         self.assertEqual(clone.path, '/tmp/import.json')
         self.assertEqual(clone.source_id, 'env-uuid')
-        self.assertEqual(clone.config['profile_mapping'], '{"Alice": 1}')
+        self.assertEqual(
+            clone.config['profile_bindings'][0]['profile_name'], 'Alice')
         self.assertEqual(clone.environment['name'], 'NXAL')
         self.assertIsNone(ctx.path)
 
@@ -65,7 +70,7 @@ class TestPluginContext(unittest.TestCase):
                 'name': 'NXAL Test',
                 'type': 'nx_activity_log',
                 'path': path,
-                'config': {'profile_mapping': '{}'},
+                'config': {},
                 'default_user_id': 1,
             }
             client = support.get_app().test_client()

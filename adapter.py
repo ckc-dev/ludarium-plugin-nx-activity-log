@@ -25,7 +25,6 @@ deduplicate_exports / fix_import / validate_import).
 
 import copy
 import hashlib
-import json
 import os
 import sys
 
@@ -368,8 +367,8 @@ class NXALGameTrackerAdapter:
         self.type = "nx_activity_log"
         self._messages = []
         self.config = config or {}
-        self.default_user_id = self._config_default_user(default_user_id)
-        self.profile_mapping = self._config_profile_mapping()
+        self.default_user_id = int(default_user_id)
+        self.profile_bindings = self._config_profile_bindings()
         self._cache = None
         self._cache_stamp = None
 
@@ -395,68 +394,79 @@ class NXALGameTrackerAdapter:
         return msgs
 
     # ---------- per-environment identity config ----------
-    def _config_default_user(self, fallback):
-        """The environment default, with a legacy config override if set."""
-        raw = self.config.get("default_user_id")
-        if raw in (None, ""):
-            return fallback
-        try:
-            return int(raw)
-        except (TypeError, ValueError):
-            self.report(
-                f"Ignoring invalid default_user_id config: {raw!r}")
-            return fallback
+    def _config_profile_bindings(self):
+        """Read host-resolved native profile bindings.
 
-    def _config_profile_mapping(self):
-        """Map an NXAL profile name to a Ludarium user id.
-
-        The value is stored as a JSON object in environments.config because
-        the environment form only has scalar fields. A malformed mapping is
-        reported and treated as empty rather than breaking the dashboard.
+        The host stores bindings in environment_profiles and passes them as a
+        list of {profile_key, profile_name, user_id} entries. A null user_id
+        means "unmapped; use the environment default". This is intentionally
+        not a JSON fallback: profile identity and user assignment are a
+        relational host concern.
         """
-        raw = self.config.get("profile_mapping")
+        raw = self.config.get("profile_bindings")
         if raw in (None, ""):
-            return {}
-        if isinstance(raw, dict):
-            mapping = raw
-        else:
-            try:
-                mapping = json.loads(raw)
-            except (TypeError, ValueError):
-                self.report("Ignoring invalid profile_mapping JSON.")
-                return {}
-        if not isinstance(mapping, dict):
-            self.report("profile_mapping must be a JSON object.")
-            return {}
-        result = {}
-        for name, user_id in mapping.items():
-            try:
-                result[str(name).strip().casefold()] = int(user_id)
-            except (TypeError, ValueError):
-                self.report(
-                    f"Ignoring invalid profile mapping for {name!r}: "
-                    f"{user_id!r}")
+            return []
+        if not isinstance(raw, list):
+            self.report("Ignoring invalid profile_bindings config.")
+            return []
+        result = []
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            key = str(entry.get("profile_key") or entry.get("key") or "").strip()
+            name = str(
+                entry.get("profile_name") or entry.get("name") or "").strip()
+            if not key or not name:
+                continue
+            user_id = entry.get("user_id")
+            if user_id in (None, ""):
+                resolved = None
+            else:
+                try:
+                    resolved = int(user_id)
+                except (TypeError, ValueError):
+                    self.report(
+                        f"Ignoring invalid user id for profile {name!r}.")
+                    continue
+            result.append({
+                "profile_key": key,
+                "profile_name": name,
+                "user_id": resolved,
+            })
         return result
 
-    def _user_id_for(self, user_name):
-        key = str(user_name or "").strip().casefold()
-        return self.profile_mapping.get(key, self.default_user_id)
+    def _user_id_for(self, user_name, native_id=None):
+        """Resolve a host user from a stable binding, then name fallback."""
+        key = str(native_id).strip() if native_id not in (None, "") else ""
+        for binding in self.profile_bindings:
+            if key and binding["profile_key"] == key:
+                return (binding["user_id"]
+                        if binding["user_id"] is not None
+                        else self.default_user_id)
+        folded = str(user_name or "").strip().casefold()
+        for binding in self.profile_bindings:
+            if binding["profile_name"].casefold() == folded:
+                return (binding["user_id"]
+                        if binding["user_id"] is not None
+                        else self.default_user_id)
+        return self.default_user_id
 
     def _nxal_user_for_host_id(self, data, user_id):
-        """Find the single NXAL profile mapped to a host user id."""
+        """Find the single NXAL profile bound to a host user id."""
         wanted = str(user_id)
         matches = [
             user for user in data.get("users", [])
-            if str(self._user_id_for(user.get("name", ""))) == wanted
+            if str(self._user_id_for(
+                user.get("name", ""), user.get("id"))) == wanted
         ]
         if not matches:
             raise AdapterOperationError(
-                "No NXAL profile is mapped to the selected user. Configure "
-                "profile_mapping or choose a mapped user.")
+                "No NXAL profile is bound to the selected user. Edit the "
+                "environment's profile mappings or choose a mapped user.")
         if len(matches) > 1:
             raise AdapterOperationError(
-                "Multiple NXAL profiles map to the selected user; add a "
-                "profile_mapping entry to choose one.")
+                "Multiple NXAL profiles are bound to the selected user; "
+                "unmap all but one before adding a session.")
         return matches[0]
 
     @staticmethod
@@ -721,7 +731,8 @@ class NXALGameTrackerAdapter:
                 sessions.append({
                     "game_id": game_id,
                     "name": t.get("name", "Unknown"),
-                    "native_user_id": self._user_id_for(user_name),
+                    "native_user_id": self._user_id_for(
+                        user_name, user.get("id")),
                     "session_id": _session_id(
                         self._user_identity(user), t, group),
                     "date_time": format_timestamp(start_ts),
@@ -751,7 +762,8 @@ class NXALGameTrackerAdapter:
                     sessions.append({
                         "game_id": game_id,
                         "name": t.get("name", "Unknown"),
-                        "native_user_id": self._user_id_for(user_name),
+                        "native_user_id": self._user_id_for(
+                        user_name, user.get("id")),
                         "date_time": format_timestamp(first_ts),
                         "end_time": format_timestamp(last_ts),
                         "active_segments": [{
@@ -1426,7 +1438,8 @@ class NXALGameTrackerAdapter:
                         "duration": duration,
                         "game_id": "nx_" + str(t["id"]),
                         "name": t.get("name", "Unknown"),
-                        "native_user_id": self._user_id_for(user_name),
+                        "native_user_id": self._user_id_for(
+                        user_name, user.get("id")),
                         "session_id": _session_id(
                             self._user_identity(user), t, group),
                     })

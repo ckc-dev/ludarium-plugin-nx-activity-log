@@ -1,4 +1,4 @@
-"""NXAL profile mapping and per-environment config behaviour."""
+"""NXAL native profile bindings and per-environment config behaviour."""
 
 import json
 import os
@@ -65,38 +65,54 @@ class TestNxalUserMapping(unittest.TestCase):
             'source-nxal', 'NXAL', self.path,
             default_user_id=7, config=config)
 
-    def test_profile_mapping_sets_native_user_id(self):
-        adapter = self._adapter({'profile_mapping': '{"Alice": 3}'})
+    @staticmethod
+    def _binding(user_id, name='Alice', key=USER_ID):
+        return {
+            'profile_key': key,
+            'profile_name': name,
+            'user_id': user_id,
+        }
+
+    def test_profile_binding_sets_native_user_id(self):
+        adapter = self._adapter({'profile_bindings': [self._binding(3)]})
         _, sessions, _ = adapter.fetch_dashboard_data()
         self.assertEqual(len(sessions), 1)
         self.assertEqual(sessions[0]['native_user_id'], 3)
 
     def test_unmapped_profile_uses_environment_default(self):
-        adapter = self._adapter({'profile_mapping': '{"Someone Else": 3}'})
+        adapter = self._adapter({'profile_bindings': [
+            self._binding(3, name='Someone Else', key='other-id')]})
         _, sessions, _ = adapter.fetch_dashboard_data()
         self.assertEqual(sessions[0]['native_user_id'], 7)
 
-    def test_legacy_default_user_config_overrides_environment_default(self):
-        adapter = self._adapter({'default_user_id': 4})
-        _, sessions, _ = adapter.fetch_dashboard_data()
-        self.assertEqual(adapter.default_user_id, 4)
-        self.assertEqual(sessions[0]['native_user_id'], 4)
-
-    def test_invalid_mapping_is_reported_and_ignored(self):
-        adapter = self._adapter({'profile_mapping': '{not json'})
+    def test_invalid_binding_user_id_is_reported_and_ignored(self):
+        adapter = self._adapter({'profile_bindings': [{
+            'profile_key': USER_ID,
+            'profile_name': 'Alice',
+            'user_id': 'not-an-int',
+        }]})
         _, sessions, _ = adapter.fetch_dashboard_data()
         self.assertEqual(sessions[0]['native_user_id'], 7)
-        self.assertTrue(any('profile_mapping' in message
+        self.assertTrue(any('invalid user id' in message.lower()
                             for message in adapter.drain_messages()))
 
+    def test_name_fallback_binding_is_supported(self):
+        adapter = self._adapter({'profile_bindings': [{
+            'profile_key': 'other-id',
+            'profile_name': 'alice',
+            'user_id': 3,
+        }]})
+        _, sessions, _ = adapter.fetch_dashboard_data()
+        self.assertEqual(sessions[0]['native_user_id'], 3)
+
     def test_cleanup_candidates_carry_the_mapped_user(self):
-        adapter = self._adapter({'profile_mapping': '{"alice": 3}'})
+        adapter = self._adapter({'profile_bindings': [self._binding(3)]})
         candidates = adapter.get_cleanup_candidates(999999)
         self.assertTrue(candidates)
         self.assertEqual(candidates[0]['native_user_id'], 3)
 
     def test_core_honors_native_user_id(self):
-        adapter = self._adapter({'profile_mapping': '{"Alice": 1}'})
+        adapter = self._adapter({'profile_bindings': [self._binding(1)]})
         aggregator = TrackerAggregator({'source-nxal': adapter})
         _, sessions, _, _ = aggregator.fetch_dashboard_data(
             {'show_zero': True})

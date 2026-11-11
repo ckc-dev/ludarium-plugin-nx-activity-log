@@ -791,7 +791,12 @@ class NxalSessionTest(unittest.TestCase):
         nxal_codec.write_export_json(path, data)
         adapter = NXALGameTrackerAdapter(
             'nxal', 'NXAL', path, 1,
-            config={'profile_mapping': '{"Alice": 1, "Bob": 2}'})
+            config={'profile_bindings': [
+                {'profile_key': 'A' * 32, 'profile_name': 'Alice',
+                 'user_id': 1},
+                {'profile_key': 'B' * 32, 'profile_name': 'Bob',
+                 'user_id': 2},
+            ]})
         adapter.add_session_for_user(
             'nx_' + TITLE_ID, '2026-01-15T10:00:00', 60, 2)
         loaded = adapter._load()

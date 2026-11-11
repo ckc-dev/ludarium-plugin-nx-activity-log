@@ -74,7 +74,11 @@ class TestNxalWriteMatrix(unittest.TestCase):
             _nxal_fixture(path)
             adapter = NXALGameTrackerAdapter(
                 'nxal', 'NXAL', path, 1,
-                config={'profile_mapping': '{"Alice": 1}'})
+                config={'profile_bindings': [{
+                    'profile_key': 'A' * 32,
+                    'profile_name': 'Alice',
+                    'user_id': 1,
+                }]})
 
             _, sessions, _ = adapter.fetch_dashboard_data()
             original = sessions[0]

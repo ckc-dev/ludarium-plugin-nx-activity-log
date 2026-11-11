@@ -42,7 +42,7 @@ jobs:
 
       - name: Compile plugin sources
         working-directory: host/plugins/nx_activity_log
-        run: python -m compileall -q adapter.py nxal_codec.py nxal_repair.py tests
+        run: python -m compileall -q adapter.py nxal_codec.py nxal_repair.py profiles.py tests
 
       - name: Lint
         working-directory: host/plugins/nx_activity_log
@@ -59,5 +59,5 @@ jobs:
         env:
           PYTHONPATH: ${{ github.workspace }}/host
         run: |
-          python -m coverage run --include='*/plugins/nx_activity_log/adapter.py,*/plugins/nx_activity_log/nxal_codec.py,*/plugins/nx_activity_log/nxal_repair.py,*/plugins/nx_activity_log/plugin_tools.py,*/plugins/nx_activity_log/plugin_health.py' -m unittest discover -s tests -q
+          python -m coverage run --include='*/plugins/nx_activity_log/adapter.py,*/plugins/nx_activity_log/nxal_codec.py,*/plugins/nx_activity_log/nxal_repair.py,*/plugins/nx_activity_log/profiles.py,*/plugins/nx_activity_log/plugin_tools.py,*/plugins/nx_activity_log/plugin_health.py' -m unittest discover -s tests -q
           python -m coverage report --fail-under=80 -m
