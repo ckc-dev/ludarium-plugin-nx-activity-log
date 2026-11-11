@@ -50,9 +50,10 @@ from nxal_codec import (
     focus_spans,
     format_timestamp,
     load_json,
-    sort_events,
+    normalize_event_order,
     write_export_json,
 )
+from nxal_repair import updated_summary
 
 from plugin_sdk import AdapterOperationError
 
@@ -69,6 +70,44 @@ def _group_end_clock(group):
         if isinstance(value, int):
             return value
     return None
+
+
+def _group_last_clock(group):
+    """Latest valid clock timestamp in a native event group."""
+    values = [
+        event.get("clockTimestamp") for event in group
+        if isinstance(event.get("clockTimestamp"), int)
+    ]
+    return max(values) if values else 0
+
+
+def _session_neighbor_bounds(events, group_start, group_end):
+    """Return (previous_end, next_start) around one event group."""
+    previous_end = 0
+    for event in events[:group_start]:
+        clock = event.get("clockTimestamp")
+        if isinstance(clock, int):
+            previous_end = max(previous_end, clock)
+    next_start = None
+    for event in events[group_end:]:
+        clock = event.get("clockTimestamp")
+        if isinstance(clock, int):
+            next_start = clock
+            break
+    return previous_end, next_start
+
+
+def _validate_session_span(events, group_start, group_end, new_start,
+                           new_end):
+    """Reject a whole-session edit that would collide with a neighbour."""
+    previous_end, next_start = _session_neighbor_bounds(
+        events, group_start, group_end)
+    if previous_end and new_start < previous_end:
+        raise AdapterOperationError(
+            "The session would overlap the previous session.")
+    if next_start is not None and new_end > next_start:
+        raise AdapterOperationError(
+            "The session would overlap the next session.")
 
 
 def _group_active_segments(group):
@@ -117,7 +156,7 @@ def _valid_account_events(group, start_ts):
 
 def _group_issue_flags(group, start_ts):
     """Return malformed-data flags used by the host warning/Fix action."""
-    _valid_accounts, invalid_account = _valid_account_events(
+    valid_accounts, invalid_account = _valid_account_events(
         group, start_ts)
     invalid_event = any(
         event.get("type") not in VALID_EVENT_TYPES
@@ -126,7 +165,8 @@ def _group_issue_flags(group, start_ts):
         for event in group
     )
     malformed_focus = bool(find_orphaned_lost_focus(group))
-    return invalid_account, invalid_event, malformed_focus
+    accountless = not valid_accounts
+    return invalid_account, invalid_event, malformed_focus, accountless
 
 
 def _segment_part_id(session_id, segment_number, segment_start):
@@ -260,7 +300,8 @@ def _build_session_events(start_ts, end_ts, segments, complete, anchor,
 
 
 def _warning_text(incomplete, duplicate, invalid_account=False,
-                  invalid_event=False, malformed_focus=False):
+                  invalid_event=False, malformed_focus=False,
+                  accountless=False):
     parts = []
     if incomplete:
         parts.append(
@@ -281,6 +322,10 @@ def _warning_text(incomplete, duplicate, invalid_account=False,
         parts.append(
             "Malformed focus sequence: a Lost Focus has no preceding Gained "
             "Focus. Use Fix to rebuild the session.")
+    if accountless:
+        parts.append(
+            "No account event: NXAL will not attribute this session to a "
+            "profile. Use Fix to rebuild it with account events.")
     return " ".join(parts)
 
 
@@ -293,24 +338,19 @@ def _append_warning(message, addition):
 
 
 def _session_id(user_identity, title, group):
-    """Stable host-side identity for one native NXAL session.
+    """Host-side identity for one native NXAL session.
 
-    The Launched event's (clock, steady) pair is stable across duration edits,
-    part edits and incomplete-session repair. The native NXAL user id (not
-    the display name) keeps the id stable across profile renames; the title id
-    separates sessions in different games. Two completely identical Launched
-    events in one title remain inherently indistinguishable without a
-    persistent native id, and two different groups sharing that start identity
-    also collide because the id is anchored to the start rather than the full
-    event body.
+    The full event group is part of the identity, so two sessions sharing the
+    same Launched clock/steady pair but differing in any later event cannot
+    collide. Editing a session changes its id; the host resolves the new id
+    after a mutation and migrates any user override. The native NXAL user id
+    (not the display name) keeps identity stable across profile renames, and
+    the title id separates sessions in different games.
     """
-    launched = group[0] if group else {}
     parts = [
         str(user_identity),
         str(title.get("id", "")),
-        str(launched.get("type")),
-        str(launched.get("clockTimestamp")),
-        str(launched.get("steadyTimestamp")),
+        repr(_group_fingerprint(group)),
     ]
     digest = hashlib.sha1("\x1f".join(parts).encode("utf-8")).hexdigest()
     return f"nx_{digest[:24]}"
@@ -401,6 +441,31 @@ class NXALGameTrackerAdapter:
         key = str(user_name or "").strip().casefold()
         return self.profile_mapping.get(key, self.default_user_id)
 
+    def _nxal_user_for_host_id(self, data, user_id):
+        """Find the single NXAL profile mapped to a host user id."""
+        wanted = str(user_id)
+        matches = [
+            user for user in data.get("users", [])
+            if str(self._user_id_for(user.get("name", ""))) == wanted
+        ]
+        if not matches:
+            raise AdapterOperationError(
+                "No NXAL profile is mapped to the selected user. Configure "
+                "profile_mapping or choose a mapped user.")
+        if len(matches) > 1:
+            raise AdapterOperationError(
+                "Multiple NXAL profiles map to the selected user; add a "
+                "profile_mapping entry to choose one.")
+        return matches[0]
+
+    @staticmethod
+    def _find_title_for_user(user, game_id):
+        hex_id = str(game_id).removeprefix("nx_").lower()
+        return next(
+            (title for title in user.get("titles", [])
+             if str(title.get("id", "")).lower() == hex_id),
+            None)
+
     # ---------- storage ----------
     #
     # The export is a ~1MB JSON document and the host calls _load() once per
@@ -419,6 +484,13 @@ class NXALGameTrackerAdapter:
             return self._cache
 
         data = load_json(self.path)
+        # NXAL does not sort imported events; normalize on the host boundary
+        # so grouping, summaries and session IDs all see chronological data.
+        for user in data.get("users", []):
+            for title in user.get("titles", []):
+                events = title.get("events")
+                if isinstance(events, list):
+                    title["events"] = normalize_event_order(events)
         self._cache = data
         try:
             stat = os.stat(self.path)
@@ -579,7 +651,7 @@ class NXALGameTrackerAdapter:
             start_steady=launched_steady,
             account_events=preserved_accounts)
         events[group_start:group_end] = replacement
-        events[:] = sort_events(events)
+        events[:] = normalize_event_order(events)
         self._recompute_title(data, title)
 
     def _segments_for_group(self, group):
@@ -629,12 +701,14 @@ class NXALGameTrackerAdapter:
             cleared = False
             for group in _title_session_pairs([t]):
                 duration = calculate_playtime(group)
-                start_ts = group[0]["clockTimestamp"]
+                start_ts = group[0].get("clockTimestamp")
+                if not isinstance(start_ts, int):
+                    continue
                 end_ts = _group_end_clock(group) or start_ts
                 incomplete = not any(
                     event.get("type") == "Closed" for event in group)
-                invalid_account, invalid_event, malformed_focus = (
-                    _group_issue_flags(group, start_ts))
+                (invalid_account, invalid_event, malformed_focus,
+                 accountless) = _group_issue_flags(group, start_ts)
                 group_key = (
                     self._user_identity(user), str(t.get("id", "")),
                     _group_fingerprint(group))
@@ -643,7 +717,7 @@ class NXALGameTrackerAdapter:
                 cleared = True
                 warning = _warning_text(
                     incomplete, duplicate, invalid_account,
-                    invalid_event, malformed_focus)
+                    invalid_event, malformed_focus, accountless)
                 sessions.append({
                     "game_id": game_id,
                     "name": t.get("name", "Unknown"),
@@ -775,8 +849,8 @@ class NXALGameTrackerAdapter:
         for u in data.get("users", []):
             u["titles"] = [t for t in u.get("titles", [])
                            if str(t.get("id", "")).lower() != hex_id]
-        data["users"] = [u for u in data.get("users", [])
-                         if u.get("titles")]
+        # NXAL exports include all console profiles even when they have no
+        # titles; deleting a game must not delete those profiles.
         self._save(data)
 
     def get_game_merge_candidates(self):
@@ -820,33 +894,56 @@ class NXALGameTrackerAdapter:
         self._merge_titles(primary_id, duplicate_ids)
 
     def add_session(self, game_id, start_time, duration):
+        """Add a session for the default user (legacy adapter API)."""
+        self.add_session_for_user(
+            game_id, start_time, duration, self.default_user_id)
+
+    def add_session_for_user(self, game_id, start_time, duration, user_id):
+        """Add a session to the profile selected by the host user."""
         data = copy.deepcopy(self._load())
-        title = self._find_title(data, game_id)
+        user = self._nxal_user_for_host_id(data, user_id)
+        title = self._find_title_for_user(user, game_id)
         if title is None:
-            self.add_game(game_id, str(game_id))
-            data = self._load()
-            title = self._find_title(data, game_id)
-        if title is None:
-            raise AdapterOperationError(
-                f"Could not create or find title {game_id!r} in "
-                f"'{self.display_name}'.")
+            hex_id = str(game_id).removeprefix("nx_")
+            title = {
+                "id": hex_id,
+                "name": str(game_id),
+                "events": [],
+                "summary": {
+                    "firstPlayed": 0,
+                    "lastPlayed": 0,
+                    "playtime": 0,
+                    "launches": 0,
+                },
+            }
+            user.setdefault("titles", []).append(title)
         start_ts = _parse_dt(start_time)
         events = title.setdefault("events", [])
         duration = max(0, int(duration))
         # One anchor for the whole synthesized block: steady stays monotonic
         # inside it, matching a real Launched…Closed group.
-        anchor = _anchor_for(_event_anchors(events) or _all_anchors(data), start_ts)
+        anchor = _anchor_for(
+            _event_anchors(events) or _all_anchors(data), start_ts)
         segment_start = start_ts + 2
         segment_end = segment_start + duration
+        new_end = segment_end + 3
+        for group in _title_session_pairs([title]):
+            group_start = group[0].get("clockTimestamp")
+            group_end = _group_last_clock(group)
+            if (isinstance(group_start, int)
+                    and start_ts < group_end
+                    and new_end > group_start):
+                raise AdapterOperationError(
+                    "The new session would overlap an existing session.")
         events.extend(_build_session_events(
             start_ts,
-            segment_end + 3,
+            new_end,
             [(segment_start, segment_end, duration)],
             complete=True,
             anchor=anchor,
         ))
         # canonical (clock, steady) order — see nxal_codec.sort_events
-        events[:] = sort_events(events)
+        events[:] = normalize_event_order(events)
         self._recompute_title(data, title)
         self._save(data)
 
@@ -968,18 +1065,23 @@ class NXALGameTrackerAdapter:
             group_start = self._group_start_index(events, group)
             group_end = group_start + len(group)
         new_ts = _parse_dt(new_start)
+        desired_duration = max(0, int(duration))
+        old_duration = calculate_playtime(group)
+        old_end = _group_last_clock(group)
         delta = new_ts - old_ts
+        new_end = old_end + delta + desired_duration - old_duration
+        _validate_session_span(
+            events, group_start, group_end, new_ts, new_end)
         for event in group:
             clock = event.get("clockTimestamp")
             if isinstance(clock, int):
                 event["clockTimestamp"] = clock + delta
             if isinstance(event.get("steadyTimestamp"), int):
                 event["steadyTimestamp"] += delta
-        desired_duration = max(0, int(duration))
-        if calculate_playtime(group) != desired_duration:
+        if old_duration != desired_duration:
             self._resize_last_focus_pair(
                 events, group_start, group_end, desired_duration)
-        events[:] = sort_events(events)
+        events[:] = normalize_event_order(events)
         self._recompute_title(data, title)
 
     def update_session(self, game_id, duration, new_start, old_start,
@@ -1092,12 +1194,13 @@ class NXALGameTrackerAdapter:
         start_ts = group[0].get("clockTimestamp")
         end_ts = _group_end_clock(group)
         if isinstance(start_ts, int) and isinstance(end_ts, int):
-            invalid_account, invalid_event, malformed_focus = (
-                _group_issue_flags(group, start_ts))
+            (invalid_account, invalid_event, malformed_focus,
+             accountless) = _group_issue_flags(group, start_ts)
         else:
-            invalid_account = invalid_event = malformed_focus = False
+            invalid_account = invalid_event = accountless = False
             malformed_focus = True
-        if complete and not (invalid_account or invalid_event or malformed_focus):
+        if complete and not (invalid_account or invalid_event
+                             or malformed_focus or accountless):
             if duplicate_removed:
                 self._save(data)
             return
@@ -1292,26 +1395,13 @@ class NXALGameTrackerAdapter:
     def _recompute_title(self, data, title):
         events = title.get("events", [])
         summary = title.setdefault("summary", {})
-        if not events:
-            summary.update(
-                {"firstPlayed": 0, "lastPlayed": 0, "playtime": 0,
-                 "launches": 0})
-            return
-        first, last = first_last_from_events(events, 0, 0)
-        # NXAL's firstPlayed/lastPlayed come from PDM, not from the event
-        # stream (Application.ExportJob.cpp). Preserve the existing summary
-        # values for edits; only fill them when the import has no usable
-        # values yet (for example a newly created title/session).
-        existing_first = summary.get("firstPlayed")
-        existing_last = summary.get("lastPlayed")
-        summary["firstPlayed"] = (
-            existing_first if isinstance(existing_first, int)
-            and existing_first > 0 else first)
-        summary["lastPlayed"] = (
-            existing_last if isinstance(existing_last, int)
-            and existing_last > 0 else last)
-        summary["playtime"] = calculate_playtime(events)
-        summary["launches"] = count_launches(events)
+        # PDM first/last values are preserved. Summary-only titles keep their
+        # stored summary; event-derived values fill only missing/invalid
+        # pairs. Playtime follows NXAL countPlaytime accounting.
+        title["summary"] = updated_summary(
+            summary, events,
+            recalculate_first_last=False,
+            preserve_empty=True)
 
     def get_round_candidates(self):
         return []
@@ -1389,7 +1479,7 @@ class NXALGameTrackerAdapter:
                     raise AdapterOperationError(
                         f"No session starts at {ref.date_time!r} in "
                         f"'{self.display_name}'.")
-            events[:] = sort_events(events)
+            events[:] = normalize_event_order(events)
             self._recompute_title(data, title)
         self._save(data)
 
@@ -1452,7 +1542,7 @@ class NXALGameTrackerAdapter:
         # import merge uses (type, clock, steady) as the event identity, so
         # apply the same key here instead of turning a title merge into
         # duplicated sessions and doubled playtime.
-        primary["events"] = sort_events(deduplicate_events(
+        primary["events"] = normalize_event_order(deduplicate_events(
             primary.get("events", []), EVENT_IDENTITY_KEY))
         self._recompute_title(data, primary)
         self._save(data)

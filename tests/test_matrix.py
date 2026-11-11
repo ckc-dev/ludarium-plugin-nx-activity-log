@@ -104,7 +104,10 @@ class TestNxalWriteMatrix(unittest.TestCase):
             self.assertTrue(any(
                 part['start_time'] == moved_start
                 for part in parts_after))
-
+            _, sessions, _ = adapter.fetch_dashboard_data()
+            original = next(
+                s for s in sessions
+                if s['date_time'] == original['date_time'])
             second = next(s for s in sessions
                           if s['date_time'] == '2026-01-02 10:00:00')
             merge = SessionMerge(
@@ -122,7 +125,10 @@ class TestNxalWriteMatrix(unittest.TestCase):
                 SessionRef('nxal', sessions[0]['date_time'],
                            sessions[0]['session_id'])])
             _, sessions, _ = adapter.fetch_dashboard_data()
-            self.assertEqual(sessions, [])
+            # The PDM-backed summary survives deletion of the only event
+            # session; the adapter surfaces it as a synthetic summary row,
+            # not as a native session.
+            self.assertFalse(any(s.get('session_id') for s in sessions))
 
             with self.assertRaises(AdapterOperationError):
                 adapter.get_raw_export()

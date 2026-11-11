@@ -276,6 +276,10 @@ class NxalSessionTest(unittest.TestCase):
         adapter.update_session_part(
             parts[0]['part_id'], 80, parts[0]['start_time'],
             parts[0]['start_time'])
+        # A full-group session id changes after an edit; refresh the row
+        # before issuing the next exact-session operation.
+        refreshed = adapter.fetch_dashboard_data()[1]
+        target = refreshed[1]
         with self.assertRaises(AdapterOperationError):
             adapter.add_session_part(
                 target['game_id'],
@@ -288,10 +292,12 @@ class NxalSessionTest(unittest.TestCase):
              + timedelta(seconds=83)).strftime('%Y-%m-%d %H:%M:%S'),
             1, session_id=target['session_id'])
         refreshed = adapter.fetch_dashboard_data()[1]
+        target = refreshed[1]
         by_id = {row['session_id']: row for row in refreshed}
         self.assertEqual(by_id[target['session_id']]['duration'], 81)
         untargeted = next(
-            row for row in refreshed if row['session_id'] != target['session_id'])
+            row for row in refreshed
+            if row['session_id'] != target['session_id'])
         self.assertEqual(untargeted['duration'], 100)
 
     def test_session_id_survives_profile_rename(self):
@@ -579,7 +585,7 @@ class NxalSessionTest(unittest.TestCase):
             parts[0]['part_id'], 25, parts[0]['start_time'],
             parts[0]['start_time'])
         refreshed = adapter.fetch_dashboard_data()[1][0]
-        self.assertEqual(refreshed['session_id'], session_id)
+        self.assertNotEqual(refreshed['session_id'], session_id)
         self.assertEqual(refreshed['duration'], 55)
         rebuilt = adapter.get_session_parts('nx_' + TITLE_ID,
                                             refreshed['date_time'])
@@ -638,7 +644,8 @@ class NxalSessionTest(unittest.TestCase):
     def test_fix_import_preserves_distinct_events_and_recomputes_summary(self):
         path, _adapter = self._adapter()
         result = plugin_tools.fix_import(
-            {'path': path}, type('Ctx', (), {'path': path})())
+            {'path': path, 'recalculate_first_last': 'on'},
+            type('Ctx', (), {'path': path})())
         self.assertTrue(result['ok'])
         data = nxal_codec.load_json(path)
         title = data['users'][0]['titles'][0]
@@ -671,7 +678,8 @@ class NxalSessionTest(unittest.TestCase):
         }
         path, _adapter = self._adapter(data)
         result = plugin_tools.fix_import(
-            {'path': path}, type('Ctx', (), {'path': path})())
+            {'path': path, 'recalculate_first_last': 'on'},
+            type('Ctx', (), {'path': path})())
         self.assertTrue(result['ok'])
         title = nxal_codec.load_json(path)['users'][0]['titles'][0]
         self.assertEqual(
@@ -681,6 +689,113 @@ class NxalSessionTest(unittest.TestCase):
         self.assertEqual(title['summary']['lastPlayed'], start + 12)
         self.assertEqual(title['summary']['playtime'], 10)
         self.assertTrue(os.path.exists(path + '.bak'))
+
+
+    def test_accountless_session_warns_and_repairs(self):
+        start = START
+        events = [
+            {'type': 'Launched', 'clockTimestamp': start,
+             'steadyTimestamp': 100},
+            {'type': 'Gained Focus', 'clockTimestamp': start + 2,
+             'steadyTimestamp': 102},
+            {'type': 'Lost Focus', 'clockTimestamp': start + 62,
+             'steadyTimestamp': 162},
+            {'type': 'Closed', 'clockTimestamp': start + 63,
+             'steadyTimestamp': 163},
+        ]
+        path, adapter = self._adapter(_payload(events))
+        row = adapter.fetch_dashboard_data()[1][0]
+        self.assertIn('No account event', row['session_warning'])
+        self.assertTrue(row['repair_available'])
+        adapter.repair_incomplete_session(
+            'nx_' + TITLE_ID, row['date_time'], session_id=row['session_id'])
+        repaired = adapter.fetch_dashboard_data()[1][0]
+        self.assertNotIn('No account event', repaired['session_warning'])
+        types = [event['type'] for event in
+                 adapter._load()['users'][0]['titles'][0]['events']]
+        self.assertIn('Account Login', types)
+        self.assertIn('Account Logout', types)
+
+    def test_whole_session_edit_rejects_neighbor_overlap(self):
+        start = int(datetime(2026, 1, 12, 10, 0, 0).timestamp())
+        events = (_complete_events(start, 100)
+                  + _complete_events(start + 200, 100))
+        path, adapter = self._adapter(_payload(events))
+        row = adapter.fetch_dashboard_data()[1][0]
+        with self.assertRaises(AdapterOperationError):
+            adapter.update_session(
+                'nx_' + TITLE_ID, 500, row['date_time'], row['date_time'],
+                session_id=row['session_id'])
+
+    def test_add_session_rejects_neighbor_overlap(self):
+        start = int(datetime(2026, 1, 13, 10, 0, 0).timestamp())
+        path, adapter = self._adapter(_payload(
+            _complete_events(start, 100)))
+        with self.assertRaises(AdapterOperationError):
+            adapter.add_session(
+                'nx_' + TITLE_ID,
+                datetime.fromtimestamp(start + 50).strftime(
+                    '%Y-%m-%dT%H:%M:%S'), 20)
+
+    def test_full_group_session_ids_do_not_collide(self):
+        start = int(datetime(2026, 1, 14, 10, 0, 0).timestamp())
+        first = _complete_events(start, 100)
+        second = _complete_events(start, 200)
+        path, adapter = self._adapter(_payload(first + second))
+        rows = adapter.fetch_dashboard_data()[1]
+        self.assertEqual(len(rows), 2)
+        self.assertNotEqual(rows[0]['session_id'], rows[1]['session_id'])
+
+    def test_read_normalizes_event_order(self):
+        events = list(reversed(_complete_events()))
+        path, adapter = self._adapter(_payload(events))
+        title = adapter._load()['users'][0]['titles'][0]
+        self.assertEqual(title['events'], _complete_events())
+        self.assertEqual(len(adapter.fetch_dashboard_data()[1]), 1)
+
+    def test_add_session_for_user_selects_the_profile(self):
+        data = _payload(_complete_events())
+        data['users'].append({
+            'id': 'B' * 32,
+            'name': 'Bob',
+            'titles': [],
+        })
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, 'import.json')
+        nxal_codec.write_export_json(path, data)
+        adapter = NXALGameTrackerAdapter(
+            'nxal', 'NXAL', path, 1,
+            config={'profile_mapping': '{"Alice": 1, "Bob": 2}'})
+        adapter.add_session_for_user(
+            'nx_' + TITLE_ID, '2026-01-15T10:00:00', 60, 2)
+        loaded = adapter._load()
+        alice, bob = loaded['users']
+        self.assertEqual(len(alice['titles'][0]['events']), 6)
+        self.assertEqual(len(bob['titles'][0]['events']), 6)
+
+
+
+    def test_delete_game_keeps_console_profiles(self):
+        path, adapter = self._adapter()
+        adapter.delete_game('nx_' + TITLE_ID)
+        users = adapter._load()['users']
+        self.assertEqual(len(users), 1)
+        self.assertEqual(users[0]['titles'], [])
+
+    def test_recalculate_totals_preserves_summary_only_values(self):
+        summary = {
+            'firstPlayed': 1000, 'lastPlayed': 2000,
+            'playtime': 500, 'launches': 3,
+        }
+        data = _payload([])
+        data['users'][0]['titles'][0]['summary'] = dict(summary)
+        path, adapter = self._adapter(data)
+        adapter.recalculate_totals()
+        self.assertEqual(
+            adapter._load()['users'][0]['titles'][0]['summary'],
+            summary)
+
 
     def test_game_merge_candidates_are_scoped_to_one_user(self):
         path, adapter = self._adapter()
@@ -821,7 +936,7 @@ class NxalSessionTest(unittest.TestCase):
             'nx_' + TITLE_ID, row['date_time'], session_id=row['session_id'])
         repaired = adapter.fetch_dashboard_data()[1][0]
         self.assertFalse(repaired['repair_available'])
-        self.assertEqual(repaired['session_id'], row['session_id'])
+        self.assertNotEqual(repaired['session_id'], row['session_id'])
         event_types = [event['type'] for event in
                        adapter._load()['users'][0]['titles'][0]['events']]
         self.assertIn('Account Login', event_types)
