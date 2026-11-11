@@ -149,6 +149,67 @@ class TestNxalValidation(unittest.TestCase):
             validate_import.validate_users(payload, result)
         self.assertTrue(result.passed, result.errors)
 
+
+    def test_non_integer_first_last_is_an_error(self):
+        payload = {
+            'exportString': 'test',
+            'exportTimestamp': 1767225600,
+            'exportVersion': '1',
+            'users': [{
+                'id': 'A' * 32,
+                'name': 'Alice',
+                'titles': [{
+                    'id': 'B' * 16,
+                    'name': 'Game',
+                    'summary': {
+                        'firstPlayed': 'bad',
+                        'lastPlayed': 1767225600,
+                        'launches': 0,
+                        'playtime': 0,
+                    },
+                    'events': [],
+                }],
+            }],
+        }
+        result = nxal_codec.VerificationResult()
+        with redirect_stdout(io.StringIO()):
+            validate_import.validate_metadata(payload, result)
+            validate_import.validate_users(payload, result)
+        self.assertFalse(result.passed)
+        self.assertTrue(any('must be integers' in error
+                            for error in result.errors))
+
+    def test_malformed_summary_and_event_do_not_crash(self):
+        payload = {
+            'exportString': 'test',
+            'exportTimestamp': 1767225600,
+            'exportVersion': '1',
+            'users': [{
+                'id': 'A' * 32,
+                'name': 'Alice',
+                'titles': [{
+                    'id': 'B' * 16,
+                    'name': 'Game',
+                    'summary': 'bad',
+                    'events': [
+                        {'type': 'Launched',
+                         'clockTimestamp': 1767225600,
+                         'steadyTimestamp': 1},
+                        'bad-event',
+                    ],
+                }],
+            }],
+        }
+        result = nxal_codec.VerificationResult()
+        with redirect_stdout(io.StringIO()):
+            validate_import.validate_metadata(payload, result)
+            validate_import.validate_users(payload, result)
+        self.assertFalse(result.passed)
+        self.assertTrue(any('summary' in error for error in result.errors))
+        self.assertTrue(any('event is not an object' in error
+                            for error in result.errors))
+
+
     def test_invalid_export_reports_errors(self):
         result = nxal_codec.VerificationResult()
         with redirect_stdout(io.StringIO()):

@@ -80,23 +80,40 @@ def verify_users(import_data, imported_data, result):
 
     imported_by_id = {}
     for u in imported_users:
-        imported_by_id[tuple(u["id"])] = u
+        if not isinstance(u, dict):
+            result.error("importedData contains a non-object user")
+            continue
+        try:
+            imported_by_id[tuple(u["id"])] = u
+        except (KeyError, TypeError):
+            result.error("importedData contains a user without a valid id")
 
     imported_by_games = {}
     for u in imported_users:
-        game_names = frozenset(t.get("name") for t in u.get("titles", []) if t.get("name"))
+        if not isinstance(u, dict):
+            continue
+        game_names = frozenset(
+            t.get("name") for t in u.get("titles", [])
+            if isinstance(t, dict) and t.get("name"))
         if game_names:
-            imported_by_games[game_names] = u
+            imported_by_games.setdefault(game_names, []).append(u)
 
     matched_imported_ids = set()
 
     expected_count = 0
     for imp_user in import_users:
+        if not isinstance(imp_user, dict):
+            result.error("importData contains a non-object user")
+            continue
         hex_id = imp_user["id"]
         name = imp_user.get("name", "(unknown)")
         titles = imp_user.get("titles", [])
 
-        expected_id_array = hex_to_user_id_array(hex_id)
+        try:
+            expected_id_array = hex_to_user_id_array(hex_id)
+        except (TypeError, ValueError):
+            result.error(f"User '{name}': id is not valid hex: '{hex_id}'")
+            continue
 
         if len(titles) == 0:
             if tuple(expected_id_array) in imported_by_id:
@@ -118,10 +135,16 @@ def verify_users(import_data, imported_data, result):
             impd_user = imported_by_id[tuple(expected_id_array)]
             match_method = "id"
         else:
-            imp_game_names = frozenset(t.get("name") for t in titles if t.get("name"))
-            if imp_game_names in imported_by_games:
-                impd_user = imported_by_games[imp_game_names]
+            imp_game_names = frozenset(
+                t.get("name") for t in titles if t.get("name"))
+            candidates = imported_by_games.get(imp_game_names, [])
+            if len(candidates) == 1:
+                impd_user = candidates[0]
                 match_method = "name"
+            elif len(candidates) > 1:
+                result.error(
+                    f"User '{name}' cannot be matched unambiguously: "
+                    f"multiple imported profiles have the same game set")
 
         if impd_user is None:
             result.error(
@@ -171,6 +194,9 @@ def verify_users(import_data, imported_data, result):
 
 
 def verify_title(user_name, index, imp_title, impd_title, result):
+    if not isinstance(imp_title, dict) or not isinstance(impd_title, dict):
+        result.error(f"User '{user_name}' / Title#{index}: title is not an object")
+        return
     title_name = imp_title.get("name", f"Title#{index}")
     prefix = f"User '{user_name}' / '{title_name}'"
 
@@ -222,6 +248,9 @@ def verify_title(user_name, index, imp_title, impd_title, result):
 
 def verify_event(user_name, title_name, index, imp_ev, impd_ev, result):
     prefix = f"User '{user_name}' / '{title_name}' / Event#{index}"
+    if not isinstance(imp_ev, dict) or not isinstance(impd_ev, dict):
+        result.error(f"{prefix}: event is not an object")
+        return
 
     if imp_ev.get("clockTimestamp") != impd_ev.get("clockTimestamp"):
         result.error(

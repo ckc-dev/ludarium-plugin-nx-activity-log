@@ -12,8 +12,8 @@ Checks:
   - All event type strings are valid
   - Timestamps are reasonable Unix values (2017-2030)
   - firstPlayed <= lastPlayed for each title
-  - firstPlayed usually matches the first "Account Login" event
-  - lastPlayed usually matches the last "Lost Focus" event (PDM can differ)
+  - firstPlayed/lastPlayed are PDM-backed; first Account Login / last Lost
+    Focus are event-derived proxies and may legitimately differ
   - Events sorted by clockTimestamp (non-decreasing)
   - launches == count of "Launched" events
   - playtime consistent with focus event pairs (warn if >5% off)
@@ -32,7 +32,7 @@ from nxal_codec import (
     USER_ID_HEX_LENGTH,
     VALID_EVENT_TYPES,
     VerificationResult,
-    calculate_playtime,
+    calculate_nxal_playtime,
     find_duplicate_events,
     find_first_last_launch,
     find_orphaned_lost_focus,
@@ -100,6 +100,9 @@ def validate_users(data, result):
 
     seen_ids = {}
     for i, user in enumerate(users):
+        if not isinstance(user, dict):
+            result.error(f"User#{i}: user entry is not an object")
+            continue
         name = user.get("name", f"User#{i}")
         prefix = f"User '{name}'"
 
@@ -141,6 +144,9 @@ def validate_users(data, result):
 def validate_titles(user_name, titles, result):
     seen_ids = {}
     for i, title in enumerate(titles):
+        if not isinstance(title, dict):
+            result.error(f"Title#{i}: title entry is not an object")
+            continue
         title_name = title.get("name", f"Title#{i}")
         prefix = f"User '{user_name}' / '{title_name}'"
 
@@ -175,6 +181,7 @@ def validate_titles(user_name, titles, result):
             validate_summary(prefix, summary, result)
         else:
             result.error(f"{prefix}: 'summary' is not an object")
+            summary = None
 
         # Events
         events = title.get("events")
@@ -192,11 +199,13 @@ def validate_summary(prefix, summary, result):
 
     fp = summary.get("firstPlayed")
     lp = summary.get("lastPlayed")
-    if isinstance(fp, int) and isinstance(lp, int):
-        if fp <= lp:
-            result.ok(f"{prefix}: summary.firstPlayed <= lastPlayed ({fp} <= {lp})")
-        else:
-            result.error(f"{prefix}: summary.firstPlayed > lastPlayed ({fp} > {lp})")
+    if not isinstance(fp, int) or not isinstance(lp, int):
+        result.error(
+            f"{prefix}: summary.firstPlayed/lastPlayed must be integers")
+    elif fp <= lp:
+        result.ok(f"{prefix}: summary.firstPlayed <= lastPlayed ({fp} <= {lp})")
+    else:
+        result.error(f"{prefix}: summary.firstPlayed > lastPlayed ({fp} > {lp})")
 
     launches = summary.get("launches")
     if isinstance(launches, int) and launches >= 0:
@@ -220,6 +229,10 @@ def validate_events(prefix, events, summary, result):
     valid_types = True
     for i, ev in enumerate(events):
         ep = f"{prefix} / Event#{i}"
+        if not isinstance(ev, dict):
+            result.error(f"{ep}: event is not an object")
+            valid_types = False
+            continue
 
         ct = ev.get("clockTimestamp")
         st = ev.get("steadyTimestamp")
@@ -252,11 +265,13 @@ def validate_events(prefix, events, summary, result):
     else:
         result.warn(f"{prefix}: events NOT sorted by clockTimestamp")
 
-    # firstPlayed matches first "Account Login" event (NXAL behavior)
+    # firstPlayed is PDM-backed; the first Account Login is only a useful
+    # event-derived proxy and may legitimately differ.
     fp = summary.get("firstPlayed") if summary else None
     if fp is not None:
         first_login = next(
-            (ev["clockTimestamp"] for ev in events if ev["type"] == "Account Login"),
+            (ev["clockTimestamp"] for ev in events
+             if ev.get("type") == "Account Login"),
             None,
         )
         if first_login is not None:
@@ -276,7 +291,8 @@ def validate_events(prefix, events, summary, result):
     lp = summary.get("lastPlayed") if summary else None
     if lp is not None:
         last_focus = next(
-            (ev["clockTimestamp"] for ev in reversed(events) if ev["type"] == "Lost Focus"),
+            (ev["clockTimestamp"] for ev in reversed(events)
+             if ev.get("type") == "Lost Focus"),
             None,
         )
         if last_focus is not None:
@@ -307,7 +323,7 @@ def validate_events(prefix, events, summary, result):
     # playtime check: calculate from focus pairs
     declared_playtime = summary.get("playtime") if summary else None
     if declared_playtime is not None:
-        calc_playtime = calculate_playtime(events)
+        calc_playtime = calculate_nxal_playtime(events)
         if calc_playtime > 0:
             diff_pct = abs(declared_playtime - calc_playtime) / calc_playtime * 100
             if diff_pct <= 5:
@@ -360,9 +376,11 @@ def print_overall_sessions(data):
         user_name = user.get("name", "Unknown")
         for title in user.get("titles", []):
             for ev in title.get("events", []):
-                if ev.get("type") != "Launched":
+                if not isinstance(ev, dict) or ev.get("type") != "Launched":
                     continue
-                ts = ev["clockTimestamp"]
+                ts = ev.get("clockTimestamp")
+                if not isinstance(ts, int):
+                    continue
                 info = {
                     "timestamp": ts,
                     "game": title.get("name", "Unknown"),
