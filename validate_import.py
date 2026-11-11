@@ -33,6 +33,7 @@ from nxal_codec import (
     VALID_EVENT_TYPES,
     VerificationResult,
     calculate_nxal_playtime,
+    count_nxal_launches,
     find_duplicate_events,
     find_first_last_launch,
     find_orphaned_lost_focus,
@@ -308,8 +309,9 @@ def validate_events(prefix, events, summary, result):
                 f"{prefix}: no Lost Focus events, lastPlayed ({lp}) vs last event ({last_event})"
             )
 
-    # launches == count of "Launched" events
-    launch_count = sum(1 for ev in events if ev["type"] == "Launched")
+    # launches == NXAL-recognized sessions (account-bearing groups), not raw
+    # Launched event count.
+    launch_count = count_nxal_launches(events)
     declared_launches = summary.get("launches") if summary else None
     if declared_launches is not None:
         if launch_count == declared_launches:
