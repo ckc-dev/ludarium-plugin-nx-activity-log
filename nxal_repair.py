@@ -9,12 +9,12 @@ merged and deduplicated exports cannot drift apart.
 from nxal_codec import (
     EVENT_IDENTITY_KEY,
     VALID_EVENT_TYPES,
-    calculate_playtime,
+    calculate_nxal_playtime,
     count_launches,
     deduplicate_events,
     find_orphaned_lost_focus,
     first_last_from_events,
-    sort_events,
+    normalize_event_order,
 )
 
 
@@ -66,15 +66,57 @@ def remove_orphaned_lost_focus(events):
 
 
 def summary_for_events(events, fallback_first=0, fallback_last=0):
-    """Build NXAL summary fields from an event stream."""
+    """Build NXAL summary fields from an event stream.
+
+    Playtime uses NXAL ``countPlaytime()`` accounting, including its handling
+    of repeated and account-separated Lost Focus events. First/last remain
+    event-derived proxies; callers that edit existing exports should normally
+    preserve valid PDM values instead (see update_summary).
+    """
     first_played, last_played = first_last_from_events(
         events, fallback_first, fallback_last)
     return {
         "firstPlayed": first_played,
         "lastPlayed": last_played,
         "launches": count_launches(events),
-        "playtime": calculate_playtime(events),
+        "playtime": calculate_nxal_playtime(events),
     }
+
+
+def _preserved_first_last(summary, computed):
+    """Keep valid existing first/last values unless explicitly recalculating."""
+    first = summary.get("firstPlayed")
+    last = summary.get("lastPlayed")
+    if (isinstance(first, int) and first > 0
+            and isinstance(last, int) and last > 0
+            and first <= last):
+        return first, last
+    return computed["firstPlayed"], computed["lastPlayed"]
+
+
+def update_summary(summary, events, *, recalculate_first_last=False,
+                   fallback_first=0, fallback_last=0,
+                   preserve_empty=False):
+    """Update summary fields using the shared NXAL accounting policy.
+
+    By default, valid PDM first/last values are preserved and event-derived
+    values are used only when the stored pair is missing or invalid. Playtime
+    and launches always follow the event stream (NXAL's export summary is
+    event-derived for those fields). With ``preserve_empty`` a summary-only
+    title is left untouched when there are no events.
+    """
+    if not events:
+        if preserve_empty:
+            return summary
+        summary.update(summary_for_events(
+            events, fallback_first, fallback_last))
+        return summary
+    computed = summary_for_events(events, fallback_first, fallback_last)
+    if not recalculate_first_last:
+        computed["firstPlayed"], computed["lastPlayed"] = (
+            _preserved_first_last(summary, computed))
+    summary.update(computed)
+    return summary
 
 
 def repair_events(events):
@@ -87,7 +129,7 @@ def repair_events(events):
     """
     events, invalid = remove_invalid_events(events)
     events, duplicates = remove_duplicate_events(events)
-    events = sort_events(events)
+    events = normalize_event_order(events)
     events, orphans = remove_orphaned_lost_focus(events)
     return events, {
         "invalid": invalid,
@@ -97,17 +139,40 @@ def repair_events(events):
     }
 
 
-def repair_title(title):
+def updated_summary(summary, events, *, recalculate_first_last=False,
+                    fallback_first=0, fallback_last=0,
+                    preserve_empty=False):
+    """Return an updated copy of a summary without mutating the input."""
+    updated = dict(summary or {})
+    update_summary(
+        updated,
+        events,
+        recalculate_first_last=recalculate_first_last,
+        fallback_first=fallback_first,
+        fallback_last=fallback_last,
+        preserve_empty=preserve_empty,
+    )
+    return updated
+
+
+def repair_title(title, *, preserve_summary_only=True,
+                 recalculate_first_last=False):
     """Repair one title's events and summary in place; return repair counts."""
     events, stats = repair_events(title.get("events", []))
     title["events"] = events
     summary = title.setdefault("summary", {})
-    summary.update(summary_for_events(events))
+    update_summary(
+        summary,
+        events,
+        recalculate_first_last=recalculate_first_last,
+        preserve_empty=preserve_summary_only,
+    )
     stats["summary"] = summary
     return stats
 
 
-def repair_export(data):
+def repair_export(data, *, preserve_summary_only=True,
+                  recalculate_first_last=False):
     """Repair every title in an export in place and return aggregate counts."""
     totals = {
         "titles": 0,
@@ -118,7 +183,11 @@ def repair_export(data):
     }
     for user in data.get("users", []):
         for title in user.get("titles", []):
-            stats = repair_title(title)
+            stats = repair_title(
+                title,
+                preserve_summary_only=preserve_summary_only,
+                recalculate_first_last=recalculate_first_last,
+            )
             totals["titles"] += 1
             for key in ("invalid", "duplicates", "orphans", "events_removed"):
                 totals[key] += stats[key]

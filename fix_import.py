@@ -5,10 +5,12 @@ fix_import.py — Interactively fix errors in an NX-ActivityLog import.json file
 Shows each fix before applying and asks for confirmation.
 
 Usage:
-    python3 fix_import.py <import.json> [--warnings]
+    python3 fix_import.py <import.json> [--warnings] [--recalculate-first-last]
 
 Flags:
     --warnings  Also fix warnings (default: errors only)
+    --recalculate-first-last  Replace valid PDM first/last values with
+                              event-derived values
 
 A backup of the original is always saved as <import.json>.bak before any fixes are applied.
 
@@ -26,7 +28,7 @@ from nxal_codec import (
     format_timestamp,
     is_sorted,
     load_json,
-    sort_events,
+    normalize_event_order,
     write_export_json,
 )
 from nxal_repair import (
@@ -38,6 +40,7 @@ from nxal_repair import (
 )
 
 FIX_WARNINGS = "--warnings" in sys.argv
+FIX_FIRST_LAST = "--recalculate-first-last" in sys.argv
 
 
 def fix_focus_errors(events, title_name):
@@ -80,7 +83,7 @@ def fix_out_of_order(events):
     if confirm != "y":
         return events, False
 
-    sorted_events = sort_events(events)
+    sorted_events = normalize_event_order(events)
     print(f"    + Sorted {len(sorted_events)} events by clockTimestamp")
     return sorted_events, True
 
@@ -238,8 +241,11 @@ def fix_first_last(summary, events):
 
 def main():
     if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
-        print(f"Usage: {sys.argv[0]} <import.json> [--warnings]")
+        print(f"Usage: {sys.argv[0]} <import.json> [--warnings] "
+              "[--recalculate-first-last]")
         print("  --warnings  Also fix warnings (default: errors only)")
+        print("  --recalculate-first-last  Replace valid PDM first/last "
+              "with event-derived values")
         sys.exit(2)
 
     import_path = sys.argv[1]
@@ -358,7 +364,7 @@ def main():
                         changed = True
                         continue
 
-                if FIX_WARNINGS:
+                if FIX_WARNINGS and FIX_FIRST_LAST:
                     summary, fixed_first_last = fix_first_last(summary, events)
                     if fixed_first_last:
                         title_fixes += 1

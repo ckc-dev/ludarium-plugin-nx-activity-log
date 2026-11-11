@@ -20,10 +20,10 @@ from nxal_codec import (
     EVENT_IDENTITY_KEY,
     deduplicate_events,
     load_json,
-    sort_events,
+    normalize_event_order,
     write_export_json,
 )
-from nxal_repair import summary_for_events
+from nxal_repair import updated_summary
 
 # The shared EVENT_IDENTITY_KEY is NXAL's per-event identity. steadyTimestamp
 # (the monotonic boot clock) is NOT redundant with clockTimestamp: two events
@@ -31,45 +31,64 @@ from nxal_repair import summary_for_events
 # must be kept to avoid deleting real events.
 
 
-def merge_users(source_users, target_users):
+def merge_users(source_users, target_users, *, preserve_summary_only=True,
+                recalculate_first_last=False):
     """Merge source users into target users by display name."""
     merged = {}
     for user in list(target_users) + list(source_users):
         name = user["name"]
         if name in merged:
-            merged[name] = merge_single_user(merged[name], user)
+            merged[name] = merge_single_user(
+                merged[name], user,
+                preserve_summary_only=preserve_summary_only,
+                recalculate_first_last=recalculate_first_last)
         else:
-            merged[name] = normalize_user_titles(user)
+            merged[name] = normalize_user_titles(
+                user,
+                preserve_summary_only=preserve_summary_only,
+                recalculate_first_last=recalculate_first_last)
     return list(merged.values())
 
 
-def normalize_user_titles(user):
-    """Return `user` with every title's events deduplicated and sorted.
-
-    Used so that every user entering the merged result — including the
-    first file's users, which are otherwise stored as-is — has normalized
-    events. Without this, a title present in only one input keeps its raw
-    events (including PDM-artifact duplicate 'Account Logout' events) while
-    a title present in two inputs is deduplicated by merge_title, making
-    merge(dedup(x)) differ from merge(x) depending on where a title lands.
-    """
+def normalize_user_titles(user, *, preserve_summary_only=True,
+                          recalculate_first_last=False):
+    """Return `user` with every title's events normalized and summarized."""
     return {
         "id": user.get("id"),
         "name": user.get("name"),
-        "titles": [normalize_title_events(t) for t in user.get("titles", [])],
+        "titles": [
+            normalize_title_events(
+                t,
+                preserve_summary_only=preserve_summary_only,
+                recalculate_first_last=recalculate_first_last)
+            for t in user.get("titles", [])
+        ],
     }
 
 
-def merge_single_user(target, source):
+def merge_single_user(target, source, *, preserve_summary_only=True,
+                      recalculate_first_last=False):
     """Merge two users with the same name."""
-    merged_titles = {t["id"]: t for t in target.get("titles", [])}
+    merged_titles = {
+        t["id"]: normalize_title_events(
+            t,
+            preserve_summary_only=preserve_summary_only,
+            recalculate_first_last=recalculate_first_last)
+        for t in target.get("titles", [])
+    }
 
     for title in source.get("titles", []):
         tid = title["id"]
         if tid in merged_titles:
-            merged_titles[tid] = merge_title(merged_titles[tid], title)
+            merged_titles[tid] = merge_title(
+                merged_titles[tid], title,
+                preserve_summary_only=preserve_summary_only,
+                recalculate_first_last=recalculate_first_last)
         else:
-            merged_titles[tid] = normalize_title_events(title)
+            merged_titles[tid] = normalize_title_events(
+                title,
+                preserve_summary_only=preserve_summary_only,
+                recalculate_first_last=recalculate_first_last)
 
     return {
         "id": target["id"],
@@ -78,40 +97,44 @@ def merge_single_user(target, source):
     }
 
 
-def normalize_title_events(title):
-    """Return `title` with its events deduplicated and sorted in place.
+def normalize_title_events(title, *, preserve_summary_only=True,
+                           recalculate_first_last=False):
+    """Return `title` with events deduplicated/sorted and summary updated.
 
-    A title that appears in only one input is passed through merge_title
-    untouched, so its raw events (which may contain PDM-artifact duplicate
-    'Account Logout' events with identical 3-field keys) are preserved. A
-    title that appears in two inputs is deduplicated by merge_title. That
-    asymmetry made merge(dedup(x)) differ from merge(x): name-based dedup
-    moves a shared title into a single file, so it flips from the merged
-    path to the pass-through path. Normalizing events here (dedup + sort)
-    keeps every output title consistent regardless of source-count, while
-    leaving the stored summary untouched.
+    Summary-only titles are preserved by default instead of being zeroed.
+    Valid stored first/last values are also preserved unless the caller asks
+    for an explicit event-derived recalculation.
     """
     events = title.get("events", [])
-    if not events:
-        return title
-    normalized = {
+    normalized_events = normalize_event_order(
+        deduplicate_events(events, EVENT_IDENTITY_KEY))
+    summary = updated_summary(
+        title.get("summary", {}),
+        normalized_events,
+        recalculate_first_last=recalculate_first_last,
+        preserve_empty=preserve_summary_only,
+    )
+    return {
         "id": title["id"],
         "name": title["name"],
-        "summary": title["summary"],
-        "events": sort_events(deduplicate_events(events, EVENT_IDENTITY_KEY)),
+        "summary": summary,
+        "events": normalized_events,
     }
-    return normalized
 
 
-def merge_title(target, source):
+def merge_title(target, source, *, preserve_summary_only=True,
+                recalculate_first_last=False):
     """Merge two title entries for the same game."""
     target_events = target.get("events", [])
     source_events = source.get("events", [])
 
     merged_events = deduplicate_events(
         target_events + source_events, EVENT_IDENTITY_KEY)
-    merged_events = sort_events(merged_events)
-    merged_summary = merge_summary(target.get("summary", {}), source.get("summary", {}), merged_events)
+    merged_events = normalize_event_order(merged_events)
+    merged_summary = merge_summary(
+        target.get("summary", {}), source.get("summary", {}), merged_events,
+        preserve_summary_only=preserve_summary_only,
+        recalculate_first_last=recalculate_first_last)
 
     return {
         "id": target["id"],
@@ -121,24 +144,46 @@ def merge_title(target, source):
     }
 
 
-def merge_summary(target, source, events):
-    """Merge two summary objects, recomputing from merged events.
+def merge_summary(target, source, events, *, preserve_summary_only=True,
+                  recalculate_first_last=False):
+    """Merge summaries using the shared NXAL accounting policy.
 
-    firstPlayed/lastPlayed are ALWAYS recomputed from the merged events,
-    never inherited from the inputs. NXAL/PDM reports these as the first
-    "Account Login" and last "Lost Focus" events (see
-    first_last_from_events); taking min/max of the inputs' stored summaries
-    instead would silently inherit whatever drift the input files carry
-    (e.g. summary edits or readded sessions), making output
-    order-dependent and unfaithful. The input summaries are kept only as
-    the empty-events fallback.
+    Playtime/launches are event-derived. Valid stored first/last values are
+    preserved unless recalculation is requested. For summary-only titles the
+    merged first/last use the earliest/latest available values and playtime/
+    launches use the largest available value rather than zero.
     """
-    return summary_for_events(
+    target_summary = target or {}
+    source_summary = source or {}
+    firsts = [
+        value for value in (
+            target_summary.get("firstPlayed"),
+            source_summary.get("firstPlayed"))
+        if isinstance(value, int) and value > 0
+    ]
+    lasts = [
+        value for value in (
+            target_summary.get("lastPlayed"),
+            source_summary.get("lastPlayed"))
+        if isinstance(value, int) and value > 0
+    ]
+    base = {
+        "firstPlayed": min(firsts) if firsts else 0,
+        "lastPlayed": max(lasts) if lasts else 0,
+        "playtime": max(
+            target_summary.get("playtime", 0) or 0,
+            source_summary.get("playtime", 0) or 0),
+        "launches": max(
+            target_summary.get("launches", 0) or 0,
+            source_summary.get("launches", 0) or 0),
+    }
+    return updated_summary(
+        base,
         events,
-        fallback_first=(
-            target.get("firstPlayed") or source.get("firstPlayed") or 0),
-        fallback_last=(
-            target.get("lastPlayed") or source.get("lastPlayed") or 0),
+        recalculate_first_last=recalculate_first_last,
+        fallback_first=base["firstPlayed"],
+        fallback_last=base["lastPlayed"],
+        preserve_empty=preserve_summary_only,
     )
 
 
@@ -156,7 +201,8 @@ def merge_metadata(inputs):
     }
 
 
-def merge_paths(output_path, input_paths, backup=True):
+def merge_paths(output_path, input_paths, backup=True, *,
+                preserve_summary_only=True, recalculate_first_last=False):
     """Merge input exports into ``output_path`` in place.
 
     The output is backed up first when it already exists. Input files are only
@@ -176,7 +222,10 @@ def merge_paths(output_path, input_paths, backup=True):
 
     merged_users = []
     for data in inputs:
-        merged_users = merge_users(data.get("users", []), merged_users)
+        merged_users = merge_users(
+            data.get("users", []), merged_users,
+            preserve_summary_only=preserve_summary_only,
+            recalculate_first_last=recalculate_first_last)
 
     metadata = merge_metadata(inputs)
     total_titles = sum(len(u.get("titles", [])) for u in merged_users)
@@ -201,15 +250,27 @@ def merge_paths(output_path, input_paths, backup=True):
 
 
 def main():
-    if len(sys.argv) < 4:
-        print(f"Usage: {sys.argv[0]} <output.json> <input1.json> <input2.json> [...]")
+    args = sys.argv[1:]
+    recalculate_first_last = "--recalculate-first-last" in args
+    drop_summary_only = "--drop-summary-only" in args
+    args = [
+        arg for arg in args
+        if arg not in ("--recalculate-first-last", "--drop-summary-only")
+    ]
+    if len(args) < 3:
+        print(f"Usage: {sys.argv[0]} [--recalculate-first-last] "
+              "[--drop-summary-only] <output.json> <input1.json> "
+              "<input2.json> [...]")
         sys.exit(2)
 
-    output_path = sys.argv[1]
-    input_paths = sys.argv[2:]
+    output_path = args[0]
+    input_paths = args[1:]
 
     try:
-        stats = merge_paths(output_path, input_paths)
+        stats = merge_paths(
+            output_path, input_paths,
+            preserve_summary_only=not drop_summary_only,
+            recalculate_first_last=recalculate_first_last)
     except Exception as e:
         print(f"Error merging exports: {e}")
         sys.exit(1)

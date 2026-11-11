@@ -42,10 +42,10 @@ from nxal_codec import (
     EVENT_IDENTITY_KEY,
     event_key,
     load_json,
-    sort_events,
+    normalize_event_order,
     write_export_json,
 )
-from nxal_repair import summary_for_events
+from nxal_repair import updated_summary
 
 # Session identity uses the shared 3-field NXAL key applied to the session's
 # 'Launched' marker. This makes deduplicate_exports agree with
@@ -178,12 +178,17 @@ def determine_ownership(session_index, num_exports):
     return ownership
 
 
-def rebuild_export(data, ownership, export_idx, match_by, renames):
+def rebuild_export(data, ownership, export_idx, match_by, renames,
+                   summary_only_owners=None, *, preserve_summary_only=True,
+                   recalculate_first_last=False):
     """Rebuild an export keeping only sessions owned by this export.
 
-    Returns (new_data, stats_dict)
+    Summary-only titles have no session to own. When preservation is enabled,
+    each such title is assigned to the oldest export containing it, so it is
+    kept exactly once across the incremental outputs.
     """
     new_users = []
+    summary_only_owners = summary_only_owners or {}
     total_sessions_before = 0
     total_sessions_after = 0
     total_events_before = 0
@@ -202,6 +207,24 @@ def rebuild_export(data, ownership, export_idx, match_by, renames):
             total_sessions_before += len(sessions)
             total_events_before += len(events)
 
+            if not sessions:
+                summary_key = (str(match_id), str(title_id))
+                if (preserve_summary_only
+                        and summary_only_owners.get(summary_key) == export_idx):
+                    new_titles.append({
+                        "id": title_id,
+                        "name": title.get("name", ""),
+                        "summary": updated_summary(
+                            title.get("summary", {}),
+                            [],
+                            recalculate_first_last=(
+                                recalculate_first_last),
+                            preserve_empty=preserve_summary_only,
+                        ),
+                        "events": [],
+                    })
+                continue
+
             owned_sessions = []
             for sess in sessions:
                 key = session_key(sess, title_id, match_id)
@@ -214,7 +237,7 @@ def rebuild_export(data, ownership, export_idx, match_by, renames):
                 new_events = []
                 for sess in owned_sessions:
                     new_events.extend(sess["events"])
-                new_events = sort_events(new_events)
+                new_events = normalize_event_order(new_events)
 
                 total_events_after += len(new_events)
 
@@ -222,14 +245,13 @@ def rebuild_export(data, ownership, export_idx, match_by, renames):
                 new_titles.append({
                     "id": title_id,
                     "name": title.get("name", ""),
-                    "summary": summary_for_events(
+                    "summary": updated_summary(
+                        summary,
                         new_events,
-                        # NXAL/PDM reports firstPlayed/lastPlayed as the
-                        # first "Account Login" and last "Lost Focus" events,
-                        # NOT the raw Launched...Closed extremes. The shared
-                        # helper keeps merge/deduplicate in agreement.
+                        recalculate_first_last=recalculate_first_last,
                         fallback_first=summary.get("firstPlayed", 0),
                         fallback_last=summary.get("lastPlayed", 0),
+                        preserve_empty=False,
                     ),
                     "events": new_events,
                 })
@@ -255,7 +277,34 @@ def rebuild_export(data, ownership, export_idx, match_by, renames):
     }
 
 
-def deduplicate_paths(input_paths, match_by="name", renames=None, backup=True):
+def find_summary_only_owners(exports, match_by, renames):
+    """Return ``{(user_identity, title_id): export_idx}`` for summary-only titles.
+
+    A title is summary-only only when no selected export has any session for
+    that user/title. The oldest export containing it owns it.
+    """
+    with_sessions = set()
+    candidates = {}
+    for export_idx, (_path, data) in enumerate(exports):
+        for user in data.get("users", []):
+            identity = str(user_identity(user, match_by, renames))
+            for title in user.get("titles", []):
+                title_id = str(title.get("id"))
+                key = (identity, title_id)
+                if extract_sessions(title.get("events", [])):
+                    with_sessions.add(key)
+                else:
+                    candidates.setdefault(key, set()).add(export_idx)
+    return {
+        key: min(indices)
+        for key, indices in candidates.items()
+        if key not in with_sessions
+    }
+
+
+def deduplicate_paths(input_paths, match_by="name", renames=None, backup=True,
+                      *, preserve_summary_only=True,
+                      recalculate_first_last=False):
     """Deduplicate overlapping exports in place.
 
     This is the shared implementation used by both the CLI and the
@@ -274,13 +323,18 @@ def deduplicate_paths(input_paths, match_by="name", renames=None, backup=True):
 
     session_index = build_session_index(exports, match_by, renames)
     ownership = determine_ownership(session_index, len(exports))
+    summary_only_owners = find_summary_only_owners(
+        exports, match_by, renames)
     results = []
     for export_idx, (path, data) in enumerate(exports):
         backup_path = path + ".bak"
         if backup:
             shutil.copy2(path, backup_path)
         new_data, stats = rebuild_export(
-            data, ownership, export_idx, match_by, renames)
+            data, ownership, export_idx, match_by, renames,
+            summary_only_owners=summary_only_owners,
+            preserve_summary_only=preserve_summary_only,
+            recalculate_first_last=recalculate_first_last)
         write_export_json(path, new_data)
         stats["path"] = path
         stats["backup"] = backup_path if backup else None
@@ -290,12 +344,22 @@ def deduplicate_paths(input_paths, match_by="name", renames=None, backup=True):
 
 def main():
     if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
-        print(f"Usage: {sys.argv[0]} [--match-by name|id] [--rename OLD=NEW ...] <input1.json> <input2.json> [...]")
+        print(f"Usage: {sys.argv[0]} [--match-by name|id] "
+              "[--rename OLD=NEW ...] [--recalculate-first-last] "
+              "[--drop-summary-only] <input1.json> <input2.json> [...]")
         print("  --match-by name|id   Identity for session-key user component (default: name)")
         print("  --rename OLD=NEW     Treat OLD and NEW as the same user name (repeatable)")
+        print("  --recalculate-first-last  Replace PDM first/last with event values")
+        print("  --drop-summary-only  Remove titles that have a summary but no events")
         sys.exit(2)
 
     args = sys.argv[1:]
+    recalculate_first_last = "--recalculate-first-last" in args
+    drop_summary_only = "--drop-summary-only" in args
+    args = [
+        arg for arg in args
+        if arg not in ("--recalculate-first-last", "--drop-summary-only")
+    ]
 
     match_by = "name"
     if "--match-by" in args:
@@ -321,7 +385,9 @@ def main():
     input_paths = args
     try:
         results = deduplicate_paths(
-            input_paths, match_by=match_by, renames=renames)
+            input_paths, match_by=match_by, renames=renames,
+            preserve_summary_only=not drop_summary_only,
+            recalculate_first_last=recalculate_first_last)
     except Exception as e:
         print(f"Error deduplicating exports: {e}")
         sys.exit(1)

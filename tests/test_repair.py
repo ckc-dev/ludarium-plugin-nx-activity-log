@@ -3,7 +3,7 @@
 import unittest
 from unittest import mock
 
-from plugins.nx_activity_log import fix_import, nxal_repair
+from plugins.nx_activity_log import fix_import, nxal_codec, nxal_repair
 
 START = 1767225600
 
@@ -86,6 +86,37 @@ class TestRepairEvents(unittest.TestCase):
         self.assertNotIn("Lost Focus", [event["type"] for event in repaired])
         self.assertEqual(len(repaired), 3)
 
+    def test_nxal_playtime_includes_account_separated_orphan(self):
+        events = [
+            {"type": "Launched", "clockTimestamp": START,
+             "steadyTimestamp": 100},
+            {"type": "Gained Focus", "clockTimestamp": START + 2,
+             "steadyTimestamp": 102},
+            {"type": "Account Login", "clockTimestamp": START + 3,
+             "steadyTimestamp": 103},
+            {"type": "Lost Focus", "clockTimestamp": START + 32,
+             "steadyTimestamp": 132},
+            {"type": "Account Logout", "clockTimestamp": START + 33,
+             "steadyTimestamp": 133},
+            {"type": "Lost Focus", "clockTimestamp": START + 34,
+             "steadyTimestamp": 134},
+        ]
+        self.assertEqual(nxal_codec.calculate_playtime(events), 30)
+        self.assertEqual(nxal_codec.calculate_nxal_playtime(events), 62)
+        self.assertEqual(
+            nxal_repair.summary_for_events(events)["playtime"], 62)
+
+    def test_normalize_event_order_keeps_duplicate_groups(self):
+        events = _events() + _events()
+        normalized = nxal_codec.normalize_event_order(events)
+        self.assertEqual(len(normalized), len(events))
+        groups = list(nxal_codec._title_session_pairs([{
+            "events": normalized,
+        }]))
+        self.assertEqual(len(groups), 2)
+        self.assertEqual(groups[0], _events())
+        self.assertEqual(groups[1], _events())
+
     def test_summary_for_events_uses_nxal_first_last_semantics(self):
         summary = nxal_repair.summary_for_events(_events())
         self.assertEqual(summary, {
@@ -103,6 +134,42 @@ class TestRepairEvents(unittest.TestCase):
                 "launches": 0,
                 "playtime": 0,
             })
+
+    def test_repair_export_preserves_summary_only_by_default(self):
+        summary = {
+            "firstPlayed": 1000,
+            "lastPlayed": 2000,
+            "launches": 3,
+            "playtime": 500,
+        }
+        data = {"users": [{"titles": [{
+            "events": [],
+            "summary": dict(summary),
+        }]}]}
+        nxal_repair.repair_export(data)
+        self.assertEqual(data["users"][0]["titles"][0]["summary"], summary)
+        nxal_repair.repair_export(
+            data, preserve_summary_only=False)
+        self.assertEqual(
+            data["users"][0]["titles"][0]["summary"],
+            {"firstPlayed": 0, "lastPlayed": 0, "launches": 0,
+             "playtime": 0})
+
+    def test_update_summary_preserves_pdm_first_last(self):
+        summary = {
+            "firstPlayed": 1000,
+            "lastPlayed": 2000,
+            "launches": 1,
+            "playtime": 30,
+        }
+        nxal_repair.update_summary(summary, _events())
+        self.assertEqual(summary["firstPlayed"], 1000)
+        self.assertEqual(summary["lastPlayed"], 2000)
+        self.assertEqual(summary["playtime"], 30)
+        nxal_repair.update_summary(
+            summary, _events(), recalculate_first_last=True)
+        self.assertEqual(summary["firstPlayed"], START + 3)
+        self.assertEqual(summary["lastPlayed"], START + 32)
 
     def test_repair_export_updates_all_titles(self):
         data = {
@@ -128,7 +195,9 @@ class TestRepairEvents(unittest.TestCase):
                 ],
             }],
         }
-        totals = nxal_repair.repair_export(data)
+        totals = nxal_repair.repair_export(
+            data, recalculate_first_last=True,
+            preserve_summary_only=False)
         self.assertEqual(totals["titles"], 2)
         self.assertEqual(totals["invalid"], 1)
         self.assertEqual(totals["events_removed"], 1)

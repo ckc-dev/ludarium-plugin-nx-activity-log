@@ -28,6 +28,15 @@ def _path(params, ctx):
     return path, None
 
 
+def _flag(params, name, default=False):
+    value = params.get(name)
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
 def _lines(result):
     lines = []
     lines.extend(f"ERROR: {message}" for message in result.errors)
@@ -147,7 +156,15 @@ def fix_export(params, ctx):
             'lines': [],
         }
 
-    stats = repair_export(data)
+    recalculate_first_last = _flag(
+        params, 'recalculate_first_last', False)
+    preserve_summary_only = _flag(
+        params, 'preserve_summary_only', True)
+    stats = repair_export(
+        data,
+        preserve_summary_only=preserve_summary_only,
+        recalculate_first_last=recalculate_first_last,
+    )
     write_export_json(path, data)
     return {
         'ok': True,
@@ -159,7 +176,11 @@ def fix_export(params, ctx):
             f"  Invalid: {stats['invalid']}",
             f"  Duplicates: {stats['duplicates']}",
             f"  Orphan focus: {stats['orphans']}",
-            'Events sorted and summary timestamps repaired.',
+            ("First/last recalculated from events."
+             if recalculate_first_last
+             else "Existing valid first/last values preserved."),
+            ("Summary-only titles preserved." if preserve_summary_only
+             else "Summary-only titles reset to zero."),
         ],
     }
 
@@ -205,7 +226,11 @@ def merge_export(params, ctx):
         }
     try:
         stats = merge_exports.merge_paths(
-            paths[0], paths, backup=True)
+            paths[0], paths, backup=True,
+            preserve_summary_only=_flag(
+                params, 'preserve_summary_only', True),
+            recalculate_first_last=_flag(
+                params, 'recalculate_first_last', False))
     except Exception as merge_error:
         return {'ok': False, 'message': str(merge_error), 'lines': []}
     return {
@@ -236,7 +261,11 @@ def deduplicate_export(params, ctx):
     try:
         results = deduplicate_exports.deduplicate_paths(
             paths, match_by=match_by,
-            renames=_renames(params.get('renames')), backup=True)
+            renames=_renames(params.get('renames')), backup=True,
+            preserve_summary_only=_flag(
+                params, 'preserve_summary_only', True),
+            recalculate_first_last=_flag(
+                params, 'recalculate_first_last', False))
     except Exception as dedup_error:
         return {'ok': False, 'message': str(dedup_error), 'lines': []}
     lines = []
@@ -265,6 +294,22 @@ _SOURCE_FIELD = {
     'help': 'The selected environment is the target; select one or more '
             'additional NXAL environments.',
 }
+_PRESERVE_SUMMARY_ONLY_FIELD = {
+    'name': 'preserve_summary_only',
+    'label': 'Keep summary-only titles',
+    'type': 'checkbox',
+    'default': True,
+    'help': 'Keep titles that have a summary but no events. NXAL can export '
+            'these when PDM has statistics but no event session.',
+}
+_RECALCULATE_FIRST_LAST_FIELD = {
+    'name': 'recalculate_first_last',
+    'label': 'Recalculate first/last from events',
+    'type': 'checkbox',
+    'default': False,
+    'help': 'Off preserves valid PDM-backed firstPlayed/lastPlayed values. '
+            'On derives both from the event stream and may overwrite PDM data.',
+}
 
 PLUGIN_TOOLS = [
     {
@@ -290,7 +335,8 @@ PLUGIN_TOOLS = [
         'description': 'Back up, sort, repair malformed/duplicate events, and '
                        'fix summary first/last/playtime/launches.',
         'needs_environment': True,
-        'fields': [],
+        'fields': [_PRESERVE_SUMMARY_ONLY_FIELD,
+                   _RECALCULATE_FIRST_LAST_FIELD],
         'execute': fix_export,
     },
     {
@@ -299,7 +345,9 @@ PLUGIN_TOOLS = [
         'description': 'Merge selected source environments into the selected '
                        'target, with a backup.',
         'needs_environment': True,
-        'fields': [_SOURCE_FIELD],
+        'fields': [_SOURCE_FIELD,
+                   _PRESERVE_SUMMARY_ONLY_FIELD,
+                   _RECALCULATE_FIRST_LAST_FIELD],
         'execute': merge_export,
     },
     {
@@ -327,6 +375,8 @@ PLUGIN_TOOLS = [
                 'placeholder': 'OldName=NewName, Other=Name',
                 'help': 'Optional; only used with name matching.',
             },
+            _PRESERVE_SUMMARY_ONLY_FIELD,
+            _RECALCULATE_FIRST_LAST_FIELD,
         ],
         'execute': deduplicate_export,
     },

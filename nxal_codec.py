@@ -112,8 +112,53 @@ def focus_intervals(events):
 
 
 def calculate_playtime(events):
-    """Calculate credited playtime from completed Gained/Lost Focus pairs."""
+    """Calculate credited playtime from completed Gained/Lost Focus pairs.
+
+    This is the host-side active-play accounting used for logical session
+    segments. It intentionally ignores account-separated orphan Lost Focus
+    events; see calculate_nxal_playtime() for NXAL's export accounting.
+    """
     return sum(duration for _start, duration in focus_intervals(events))
+
+
+def calculate_nxal_playtime(events):
+    """Reproduce NXAL ``countPlaytime()`` summary accounting.
+
+    NXAL walks each native session separately. A Lost Focus normally credits
+    steadyTimestamp - previous Gained Focus steadyTimestamp. Repeated Lost
+    Focus events are skipped, but a Lost Focus separated from the previous
+    one by account events is counted again from the previous focus start.
+    This is the accounting NXAL uses when writing export summaries.
+
+    Session boundaries reset the reference values, matching the outer loop in
+    ``PlayData::countPlaytime``. The function deliberately mirrors that
+    behavior so tool-written summaries agree with NXAL even when malformed
+    focus sequences are retained.
+    """
+    total = 0
+    last_ts = 0
+    index = 0
+    while index < len(events):
+        event = events[index]
+        event_type = event.get("type")
+        if event_type == "Launched":
+            # NXAL calls countPlaytime() once per PD session.
+            last_ts = 0
+        elif event_type == "Gained Focus":
+            last_ts = event.get("steadyTimestamp", 0)
+        elif event_type == "Lost Focus":
+            steady = event.get("steadyTimestamp")
+            clock = event.get("clockTimestamp")
+            if isinstance(steady, int) and isinstance(clock, int):
+                # Full-range countPlaytime() uses the steady clock. If a
+                # malformed sequence has no preceding focus, NXAL still
+                # performs this subtraction; preserve that behavior.
+                total += steady - last_ts
+            while (index + 1 < len(events)
+                   and events[index + 1].get("type") == "Lost Focus"):
+                index += 1
+        index += 1
+    return total
 
 
 def find_duplicate_events(events):
@@ -198,14 +243,19 @@ def deduplicate_events(events, key_fields):
 
 
 def sort_events(events):
-    """Return `events` sorted by (clockTimestamp, steadyTimestamp).
+    """Return valid event mappings sorted by clock/steady timestamp.
 
-    Two-level sort gives a deterministic byte order even when multiple
-    events share the same clockTimestamp (e.g. NXAL consecutive events
-    logged within the same second), so merged/deduplicated output does
-    not depend on input ordering.
+    Non-mapping entries are ignored so a malformed persisted event cannot
+    crash dashboard reads or repair tools. Validation still reports them
+    from the original file.
     """
-    return sorted(events, key=lambda e: (e.get("clockTimestamp", 0), e.get("steadyTimestamp", 0)))
+    return sorted(
+        (event for event in events if isinstance(event, dict)),
+        key=lambda event: (
+            event.get("clockTimestamp", 0),
+            event.get("steadyTimestamp", 0),
+        ),
+    )
 
 
 def normalize_export(data):
@@ -268,19 +318,27 @@ def first_last_from_events(events, fallback_first=0, fallback_last=0):
     array, so event-derived values are the best available proxy, not an
     exact reproduction of PDM (this most often affects lastPlayed).
     """
-    if not events:
+    valid_events = [
+        event for event in events
+        if isinstance(event, dict)
+        and isinstance(event.get("clockTimestamp"), int)
+    ]
+    if not valid_events:
         return fallback_first, fallback_last
 
-    first_login = next(
-        (ev["clockTimestamp"] for ev in events if ev["type"] == "Account Login"), None
-    )
-    last_focus = next(
-        (ev["clockTimestamp"] for ev in reversed(events) if ev["type"] == "Lost Focus"),
-        None,
-    )
+    # Use extrema rather than file order so imported events appended after
+    # newer PDM events still produce a stable proxy.
+    first_login = min(
+        (ev["clockTimestamp"] for ev in valid_events
+         if ev.get("type") == "Account Login"),
+        default=None)
+    last_focus = max(
+        (ev["clockTimestamp"] for ev in valid_events
+         if ev.get("type") == "Lost Focus"),
+        default=None)
 
-    earliest = min(ev["clockTimestamp"] for ev in events)
-    latest = max(ev["clockTimestamp"] for ev in events)
+    earliest = min(ev["clockTimestamp"] for ev in valid_events)
+    latest = max(ev["clockTimestamp"] for ev in valid_events)
 
     first_played = first_login if first_login is not None else earliest
     last_played = last_focus if last_focus is not None else latest
@@ -293,8 +351,12 @@ def format_timestamp(ts):
 
 
 def is_sorted(events):
-    """Return True if events are sorted by clockTimestamp (non-decreasing)."""
-    timestamps = [ev["clockTimestamp"] for ev in events]
+    """Return True if valid events are sorted by clockTimestamp."""
+    timestamps = [
+        event.get("clockTimestamp") for event in events
+        if isinstance(event, dict)
+        and isinstance(event.get("clockTimestamp"), int)
+    ]
     return timestamps == sorted(timestamps)
 
 
@@ -309,7 +371,9 @@ def find_first_last_launch(titles):
 
     for title in titles:
         for ev in title.get("events", []):
-            if ev["type"] == "Launched":
+            if (isinstance(ev, dict)
+                    and ev.get("type") == "Launched"
+                    and isinstance(ev.get("clockTimestamp"), int)):
                 ts = ev["clockTimestamp"]
                 info = {"game": title.get("name", "Unknown"), "timestamp": ts}
 
@@ -363,6 +427,8 @@ def _title_session_pairs(titles):
         group = []
         in_group = False
         for ev in t.get("events", []):
+            if not isinstance(ev, dict):
+                continue
             if ev.get("type") == "Launched":
                 if group and any(e["type"] == "Launched" for e in group):
                     yield group
@@ -377,6 +443,37 @@ def _title_session_pairs(titles):
         if group and any(e["type"] == "Launched" for e in group):
             yield group
     return
+
+
+def normalize_event_order(events):
+    """Normalize native event order without crossing session boundaries.
+
+    Sorting the whole title array by timestamp interleaves two sessions that
+    begin at the same clock/steady instant. NXAL can legitimately contain
+    duplicate or near-duplicate sessions, so normalize each session group
+    independently and then order the groups by their first timestamp.
+    """
+    valid_events = [event for event in events if isinstance(event, dict)]
+    groups = list(_title_session_pairs([{"events": valid_events}]))
+    if not groups:
+        return sort_events(valid_events)
+    # If the original order does not describe complete group coverage (for
+    # example a deliberately reversed whole-title array), group boundaries
+    # are unknowable. Fall back to a global stable sort; normal NXAL/imported
+    # data has complete groups and keeps its boundaries.
+    if sum(len(group) for group in groups) < len(valid_events):
+        return sort_events(valid_events)
+    groups_by_start = sorted(
+        groups,
+        key=lambda group: (
+            group[0].get("clockTimestamp", 0),
+            group[0].get("steadyTimestamp", 0),
+        ),
+    )
+    normalized = []
+    for group in groups_by_start:
+        normalized.extend(sort_events(group))
+    return normalized
 
 
 def _parse_dt(value):
