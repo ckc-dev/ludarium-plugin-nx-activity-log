@@ -275,6 +275,9 @@ Expected:
 - Events are normalized and summaries use NXAL-compatible playtime.
 - Summary-only titles are kept exactly once in the oldest containing export.
 - Merge of deduplicated exports converges with merging originals.
+- Adjacent session merges work without being rejected by overlap validation.
+- Malformed merge/dedup inputs are rejected with a clear error rather than
+  partially rewritten.
 
 ### Export summary
 
@@ -337,7 +340,9 @@ Expected:
 
 - Sessions with no matching Switch profile are silently skipped by NXAL.
 - Accountless groups are omitted by NXAL; the host warns and its Fix action
-  rebuilds canonical account events.
+  rebuilds canonical account events. The summary excludes accountless groups
+  until repaired. Deduplicate prefers an account-bearing copy of the same
+  session over an accountless copy.
 - A last-global trailing group is omitted by NXAL while host shows it.
 - Host warnings and validation results make the distinction visible.
 

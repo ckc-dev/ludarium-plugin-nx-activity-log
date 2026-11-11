@@ -101,8 +101,11 @@ across profile renames.
 adapter edits, because NXAL takes them from the console PDM database rather
 than deriving them from the event stream. Repair tools preserve valid PDM
 values by default and offer an explicit event-derived recalculation option.
-Summary playtime uses NXAL `countPlaytime()` accounting, including its handling
-of account-separated orphan focus events.
+Summary playtime and launches use NXAL `countPlaytime()` accounting: launches
+are session-based and only account-bearing sessions count. Accountless groups
+are reported explicitly by the adapter and can be repaired or merged with an
+account-bearing copy. Merge/deduplicate normalize event groups and reject
+structurally malformed inputs rather than partially rewriting them.
 
 ## Acknowledgements
 
