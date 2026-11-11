@@ -1,8 +1,9 @@
 """Shared NXAL repair primitives used by the CLI and host tools."""
 
 import unittest
+from unittest import mock
 
-from plugins.nx_activity_log import nxal_repair
+from plugins.nx_activity_log import fix_import, nxal_repair
 
 START = 1767225600
 
@@ -146,6 +147,59 @@ class TestRepairEvents(unittest.TestCase):
             "launches": 0,
             "playtime": 0,
         })
+
+
+class TestInteractiveCliWrappers(unittest.TestCase):
+    def test_sort_wrapper_uses_shared_ordering(self):
+        with mock.patch("builtins.input", return_value="y"):
+            events, fixed = fix_import.fix_out_of_order(
+                list(reversed(_events())))
+        self.assertTrue(fixed)
+        self.assertEqual(events, _events())
+
+    def test_invalid_field_wrapper_removes_unknown_type(self):
+        events = _events() + [{
+            "type": "Unknown",
+            "clockTimestamp": START,
+            "steadyTimestamp": 999,
+        }]
+        with mock.patch("builtins.input", return_value="y"):
+            fixed, changed = fix_import.fix_null_fields(events)
+        self.assertTrue(changed)
+        self.assertEqual(fixed, _events())
+
+    def test_focus_wrapper_removes_orphan(self):
+        events = [
+            {"type": "Launched", "clockTimestamp": START,
+             "steadyTimestamp": 1},
+            {"type": "Lost Focus", "clockTimestamp": START + 1,
+             "steadyTimestamp": 2},
+            {"type": "Account Login", "clockTimestamp": START + 2,
+             "steadyTimestamp": 3},
+            {"type": "Closed", "clockTimestamp": START + 3,
+             "steadyTimestamp": 4},
+        ]
+        with mock.patch("builtins.input", return_value="y"):
+            fixed, changed = fix_import.fix_focus_errors(events, "Game")
+        self.assertTrue(changed)
+        self.assertEqual(len(fixed), 3)
+        self.assertNotIn("Lost Focus", [event["type"] for event in fixed])
+
+    def test_duplicate_wrapper_uses_strict_identity(self):
+        event = {
+            "type": "Lost Focus",
+            "clockTimestamp": START,
+            "steadyTimestamp": 10,
+        }
+        events = [event, dict(event), {
+            "type": "Lost Focus",
+            "clockTimestamp": START,
+            "steadyTimestamp": 20,
+        }]
+        with mock.patch("builtins.input", return_value="y"):
+            fixed, changed = fix_import.fix_duplicate_events(events)
+        self.assertTrue(changed)
+        self.assertEqual(fixed, [event, events[2]])
 
 
 if __name__ == "__main__":
