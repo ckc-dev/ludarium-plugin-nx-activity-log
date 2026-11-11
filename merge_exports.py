@@ -17,23 +17,18 @@ import shutil
 import sys
 
 from nxal_codec import (
-    calculate_playtime,
-    count_launches,
+    EVENT_IDENTITY_KEY,
     deduplicate_events,
-    first_last_from_events,
     load_json,
     sort_events,
     write_export_json,
 )
+from nxal_repair import summary_for_events
 
-# NXAL deduplicates events on import/merge by a 5-field match:
-# (type, titleID, eventType, clockTimestamp, steadyTimestamp) — see
-# PlayData.cpp:386-388. titleID/type are matched at the title/user level,
-# so the remaining identity key here is the 3-tuple below. steadyTimestamp
-# (the monotonic boot clock) is NOT redundant with clockTimestamp: two
-# events can share a wall-clock second yet be distinct (e.g. across a
-# reboot), so it must be kept to avoid deleting real events.
-MERGE_DEDUP_KEY = ("type", "clockTimestamp", "steadyTimestamp")
+# The shared EVENT_IDENTITY_KEY is NXAL's per-event identity. steadyTimestamp
+# (the monotonic boot clock) is NOT redundant with clockTimestamp: two events
+# can share a wall-clock second yet be distinct (e.g. across a reboot), so it
+# must be kept to avoid deleting real events.
 
 
 def merge_users(source_users, target_users):
@@ -103,7 +98,7 @@ def normalize_title_events(title):
         "id": title["id"],
         "name": title["name"],
         "summary": title["summary"],
-        "events": sort_events(deduplicate_events(events, MERGE_DEDUP_KEY)),
+        "events": sort_events(deduplicate_events(events, EVENT_IDENTITY_KEY)),
     }
     return normalized
 
@@ -113,7 +108,8 @@ def merge_title(target, source):
     target_events = target.get("events", [])
     source_events = source.get("events", [])
 
-    merged_events = deduplicate_events(target_events + source_events, MERGE_DEDUP_KEY)
+    merged_events = deduplicate_events(
+        target_events + source_events, EVENT_IDENTITY_KEY)
     merged_events = sort_events(merged_events)
     merged_summary = merge_summary(target.get("summary", {}), source.get("summary", {}), merged_events)
 
@@ -137,21 +133,13 @@ def merge_summary(target, source, events):
     order-dependent and unfaithful. The input summaries are kept only as
     the empty-events fallback.
     """
-    first_played, last_played = first_last_from_events(
+    return summary_for_events(
         events,
-        fallback_first=target.get("firstPlayed") or source.get("firstPlayed") or 0,
-        fallback_last=target.get("lastPlayed") or source.get("lastPlayed") or 0,
+        fallback_first=(
+            target.get("firstPlayed") or source.get("firstPlayed") or 0),
+        fallback_last=(
+            target.get("lastPlayed") or source.get("lastPlayed") or 0),
     )
-
-    launches = count_launches(events)
-    playtime = calculate_playtime(events)
-
-    return {
-        "firstPlayed": first_played,
-        "lastPlayed": last_played,
-        "launches": launches,
-        "playtime": playtime,
-    }
 
 
 def merge_metadata(inputs):

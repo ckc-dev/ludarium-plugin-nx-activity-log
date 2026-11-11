@@ -39,23 +39,20 @@ import shutil
 import sys
 
 from nxal_codec import (
-    calculate_playtime,
-    count_launches,
+    EVENT_IDENTITY_KEY,
     event_key,
-    first_last_from_events,
     load_json,
     sort_events,
     write_export_json,
 )
+from nxal_repair import summary_for_events
 
-# Session identity uses the same 3-field NXAL key as merge_exports
-# (type, clockTimestamp, steadyTimestamp) applied to the session's
+# Session identity uses the shared 3-field NXAL key applied to the session's
 # 'Launched' marker. This makes deduplicate_exports agree with
 # merge_exports about which events are the "same", so that
 # merge(originalExports) and merge(deduplicatedExports) converge to the
 # same content. Two sessions whose Launched events differ in
 # steadyTimestamp are distinct (e.g. across a reboot) and are both kept.
-SESSION_KEY_FIELDS = ("type", "clockTimestamp", "steadyTimestamp")
 
 
 def extract_sessions(events):
@@ -117,7 +114,7 @@ def session_key(session, title_id, user_identity):
     merge(dedup(x)) converges with merge(x).
     """
     launched = session["events"][0]
-    return (title_id, user_identity, event_key(launched, SESSION_KEY_FIELDS))
+    return (title_id, user_identity, event_key(launched, EVENT_IDENTITY_KEY))
 
 
 def user_identity(user, match_by, renames):
@@ -222,26 +219,18 @@ def rebuild_export(data, ownership, export_idx, match_by, renames):
                 total_events_after += len(new_events)
 
                 summary = title.get("summary", {})
-                first_played, last_played = first_last_from_events(
-                    new_events,
-                    # NXAL/PDM reports firstPlayed/lastPlayed as the first
-                    # "Account Login" and last "Lost Focus" events, NOT the
-                    # raw Launched...Closed extremes. Earlier versions took
-                    # new_events[0]/[-1] here, which widened the span beyond
-                    # what NXAL would report and so diverged from a plain
-                    # merge of the same exports (see first_last_from_events).
-                    fallback_first=summary.get("firstPlayed", 0),
-                    fallback_last=summary.get("lastPlayed", 0),
-                )
                 new_titles.append({
                     "id": title_id,
                     "name": title.get("name", ""),
-                    "summary": {
-                        "firstPlayed": first_played,
-                        "lastPlayed": last_played,
-                        "launches": count_launches(new_events),
-                        "playtime": calculate_playtime(new_events),
-                    },
+                    "summary": summary_for_events(
+                        new_events,
+                        # NXAL/PDM reports firstPlayed/lastPlayed as the
+                        # first "Account Login" and last "Lost Focus" events,
+                        # NOT the raw Launched...Closed extremes. The shared
+                        # helper keeps merge/deduplicate in agreement.
+                        fallback_first=summary.get("firstPlayed", 0),
+                        fallback_last=summary.get("lastPlayed", 0),
+                    ),
                     "events": new_events,
                 })
 
