@@ -7,7 +7,11 @@ from types import SimpleNamespace
 from unittest import mock
 
 from plugins.nx_activity_log import fix_import as fix_import_cli
-from plugins.nx_activity_log import nxal_codec, plugin_tools
+from plugins.nx_activity_log import (
+    nxal_codec,
+    plugin_tools,
+    verify_import,
+)
 
 TITLE_ID = '0100DEADBEEF0000'
 USER_ID = 'A' * 32
@@ -117,6 +121,23 @@ class TestEnvironmentTools(unittest.TestCase):
                 {'path': import_path}, SimpleNamespace(path=import_path))
             self.assertTrue(result['ok'], result['lines'])
 
+
+    def test_verify_import_reports_ambiguous_user_matches(self):
+        import_data = {'users': [
+            {'id': 'A' * 32, 'name': 'Alice', 'titles': [{'name': 'Game'}]},
+            {'id': 'B' * 32, 'name': 'Bob', 'titles': [{'name': 'Game'}]},
+        ]}
+        imported_data = {'users': [
+            {'id': [1, 2], 'titles': [{'name': 'Game'}]},
+            {'id': [3, 4], 'titles': [{'name': 'Game'}]},
+        ]}
+        result = nxal_codec.VerificationResult()
+        verify_import.verify_users(import_data, imported_data, result)
+        self.assertFalse(result.passed)
+        self.assertTrue(any('unambiguously' in error
+                            for error in result.errors))
+
+
     def test_merge_export_uses_target_in_place_and_backs_up(self):
         with tempfile.TemporaryDirectory() as directory:
             target = self._write(directory, 'target.json', _payload(
@@ -151,6 +172,98 @@ class TestEnvironmentTools(unittest.TestCase):
                     for title in user.get('titles', []))
             self.assertEqual(len(remaining), 1)
 
+
+    def test_fix_export_preserves_summary_only_by_default(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data = _payload()
+            title = data['users'][0]['titles'][0]
+            title['events'] = []
+            title['summary'] = {
+                'firstPlayed': 1000, 'lastPlayed': 2000,
+                'playtime': 500, 'launches': 3,
+            }
+            path = self._write(directory, 'import.json', data)
+            result = plugin_tools.fix_export(
+                {'path': path}, SimpleNamespace(path=path))
+            self.assertTrue(result['ok'], result['lines'])
+            self.assertEqual(
+                nxal_codec.load_json(path)['users'][0]['titles'][0][
+                    'summary'],
+                title['summary'])
+
+    def test_fix_export_can_reset_summary_only_titles(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data = _payload()
+            title = data['users'][0]['titles'][0]
+            title['events'] = []
+            title['summary'] = {
+                'firstPlayed': 1000, 'lastPlayed': 2000,
+                'playtime': 500, 'launches': 3,
+            }
+            path = self._write(directory, 'import.json', data)
+            result = plugin_tools.fix_export(
+                {'path': path, 'preserve_summary_only': ''},
+                SimpleNamespace(path=path))
+            self.assertTrue(result['ok'], result['lines'])
+            self.assertEqual(
+                nxal_codec.load_json(path)['users'][0]['titles'][0][
+                    'summary'],
+                {'firstPlayed': 0, 'lastPlayed': 0,
+                 'playtime': 0, 'launches': 0})
+
+    def test_merge_preserves_summary_only_titles(self):
+        with tempfile.TemporaryDirectory() as directory:
+            summary = {
+                'firstPlayed': 1000, 'lastPlayed': 2000,
+                'playtime': 500, 'launches': 3,
+            }
+            target_data = _payload()
+            target_title = target_data['users'][0]['titles'][0]
+            target_title['events'] = []
+            target_title['summary'] = dict(summary)
+            target = self._write(directory, 'target.json', target_data)
+            source_data = _payload()
+            source_title = source_data['users'][0]['titles'][0]
+            source_title['events'] = []
+            source_title['summary'] = {
+                'firstPlayed': 1200, 'lastPlayed': 3000,
+                'playtime': 700, 'launches': 4,
+            }
+            source = self._write(directory, 'source.json', source_data)
+            result = plugin_tools.merge_export(
+                {'sources': [source]},
+                SimpleNamespace(path=target))
+            self.assertTrue(result['ok'], result['lines'])
+            merged = nxal_codec.load_json(target)['users'][0]['titles'][0]
+            self.assertEqual(merged['summary'], {
+                'firstPlayed': 1000, 'lastPlayed': 3000,
+                'playtime': 700, 'launches': 4,
+            })
+
+    def test_dedup_preserves_summary_only_title_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            summary = {
+                'firstPlayed': 1000, 'lastPlayed': 2000,
+                'playtime': 500, 'launches': 3,
+            }
+            data = _payload()
+            data['users'][0]['titles'][0]['events'] = []
+            data['users'][0]['titles'][0]['summary'] = dict(summary)
+            one = self._write(directory, 'one.json', data)
+            two = self._write(directory, 'two.json', data)
+            result = plugin_tools.deduplicate_export(
+                {'sources': [two], 'match_by': 'name'},
+                SimpleNamespace(path=one))
+            self.assertTrue(result['ok'], result['lines'])
+            titles = [
+                title
+                for path in (one, two)
+                for user in nxal_codec.load_json(path)['users']
+                for title in user.get('titles', [])
+            ]
+            self.assertEqual(len(titles), 1)
+            self.assertEqual(titles[0]['summary'], summary)
+
     def test_cli_fix_first_last_matches_tool_behavior(self):
         summary = {
             'firstPlayed': 1, 'lastPlayed': 2,
@@ -163,6 +276,27 @@ class TestEnvironmentTools(unittest.TestCase):
         self.assertEqual(fixed['firstPlayed'], START + 3)
         self.assertEqual(fixed['lastPlayed'], START + 32)
 
+
+    def test_fix_export_preserves_pdm_first_last_by_default(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data = _payload()
+            title = data['users'][0]['titles'][0]
+            title['summary'] = {
+                'firstPlayed': 111, 'lastPlayed': 222,
+                'playtime': 999, 'launches': 0,
+            }
+            path = self._write(directory, 'import.json', data)
+            result = plugin_tools.fix_export(
+                {'path': path}, SimpleNamespace(path=path))
+            self.assertTrue(result['ok'], result['lines'])
+            summary = nxal_codec.load_json(path)['users'][0]['titles'][0][
+                'summary']
+            self.assertEqual(summary['firstPlayed'], 111)
+            self.assertEqual(summary['lastPlayed'], 222)
+            self.assertEqual(summary['playtime'], 30)
+            self.assertEqual(summary['launches'], 1)
+
+
     def test_fix_export_sorts_and_repairs_summary(self):
         with tempfile.TemporaryDirectory() as directory:
             data = _payload()
@@ -174,7 +308,8 @@ class TestEnvironmentTools(unittest.TestCase):
             }
             path = self._write(directory, 'import.json', data)
             result = plugin_tools.fix_export(
-                {'path': path}, SimpleNamespace(path=path))
+                {'path': path, 'recalculate_first_last': 'on'},
+                SimpleNamespace(path=path))
             self.assertTrue(result['ok'], result['lines'])
             fixed = nxal_codec.load_json(path)
             events = fixed['users'][0]['titles'][0]['events']
