@@ -266,6 +266,39 @@ def rebuild_export(data, ownership, export_idx, match_by, renames):
     }
 
 
+def deduplicate_paths(input_paths, match_by="name", renames=None, backup=True):
+    """Deduplicate overlapping exports in place.
+
+    This is the shared implementation used by both the CLI and the
+    environment-scoped host tool. Every input is backed up before being
+    rewritten.
+    """
+    renames = renames or {}
+    if len(input_paths) < 2:
+        raise ValueError("Select at least two exports to deduplicate.")
+    exports = []
+    for path in input_paths:
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"{path} not found")
+        exports.append((path, load_json(path)))
+    exports.sort(key=lambda item: item[1].get("exportTimestamp", 0))
+
+    session_index = build_session_index(exports, match_by, renames)
+    ownership = determine_ownership(session_index, len(exports))
+    results = []
+    for export_idx, (path, data) in enumerate(exports):
+        backup_path = path + ".bak"
+        if backup:
+            shutil.copy2(path, backup_path)
+        new_data, stats = rebuild_export(
+            data, ownership, export_idx, match_by, renames)
+        write_export_json(path, new_data)
+        stats["path"] = path
+        stats["backup"] = backup_path if backup else None
+        results.append(stats)
+    return results
+
+
 def main():
     if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
         print(f"Usage: {sys.argv[0]} [--match-by name|id] [--rename OLD=NEW ...] <input1.json> <input2.json> [...]")
@@ -297,58 +330,25 @@ def main():
         print("Warning: --rename has no effect with --match-by id")
 
     input_paths = args
+    try:
+        results = deduplicate_paths(
+            input_paths, match_by=match_by, renames=renames)
+    except Exception as e:
+        print(f"Error deduplicating exports: {e}")
+        sys.exit(1)
 
-    # Validate all inputs exist
-    for path in input_paths:
-        if not os.path.exists(path):
-            print(f"Error: {path} not found")
-            sys.exit(1)
-
-    # Load all inputs
-    exports = []
-    for path in input_paths:
-        try:
-            data = load_json(path)
-            exports.append((path, data))
-        except Exception as e:
-            print(f"Error loading {path}: {e}")
-            sys.exit(1)
-
-    # Sort by exportTimestamp (oldest first)
-    exports.sort(key=lambda x: x[1].get("exportTimestamp", 0))
-
-    print(f"Loaded {len(exports)} files, sorted by date:")
-    for i, (path, data) in enumerate(exports):
-        ts = data.get("exportTimestamp", 0)
-        users = data.get("users", [])
-        titles = sum(len(u.get("titles", [])) for u in users)
-        print(f"  {i + 1}. {os.path.basename(path)} ({titles} titles, ts={ts})")
-    print()
-
-    # Build session index and determine ownership
-    session_index = build_session_index(exports, match_by, renames)
-    ownership = determine_ownership(session_index, len(exports))
-
-    # Create backups and rebuild each export
-    for export_idx, (path, data) in enumerate(exports):
-        backup_path = path + ".bak"
-        shutil.copy2(path, backup_path)
-
-        new_data, stats = rebuild_export(data, ownership, export_idx, match_by, renames)
-
-        write_export_json(path, new_data)
-        basename = os.path.basename(path)
+    for stats in results:
+        basename = os.path.basename(stats["path"])
         sessions_removed = stats["sessions_before"] - stats["sessions_after"]
         events_removed = stats["events_before"] - stats["events_after"]
-
         print(f"=== {basename} ===")
-        print(f"  Backup: {os.path.basename(backup_path)}")
+        if stats["backup"]:
+            print(f"  Backup: {os.path.basename(stats['backup'])}")
         print(f"  Sessions: {stats['sessions_after']}/{stats['sessions_before']} ({sessions_removed} removed)")
         print(f"  Events: {stats['events_after']}/{stats['events_before']} ({events_removed} removed)")
         print(f"  Titles: {stats['titles_after']}")
-        print()
 
-    print("Done. Originals saved as .bak files.")
+    print("\nDone. Originals saved as .bak files.")
 
 
 if __name__ == "__main__":

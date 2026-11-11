@@ -26,6 +26,7 @@ from nxal_codec import (
     find_duplicate_events,
     find_first_last_launch,
     find_orphaned_lost_focus,
+    first_last_from_events,
     format_timestamp,
     is_sorted,
     load_json,
@@ -220,6 +221,29 @@ def fix_playtime(summary, events):
     return summary, True
 
 
+def fix_first_last(summary, events):
+    """Recalculate firstPlayed/lastPlayed from the event stream."""
+    declared_first = summary.get("firstPlayed", 0)
+    declared_last = summary.get("lastPlayed", 0)
+    first, last = first_last_from_events(events, 0, 0)
+    if declared_first == first and declared_last == last:
+        return summary, False
+
+    print(f"\n  First/last mismatch: declared={declared_first}/{declared_last}, "
+          f"calculated={first}/{last}")
+    print(f"\n  Fix: Update firstPlayed/lastPlayed to {first}/{last}")
+
+    confirm = input("\n  Apply fix? [y/N]: ").strip().lower()
+    if confirm != "y":
+        return summary, False
+
+    summary["firstPlayed"] = first
+    summary["lastPlayed"] = last
+    print(f"    + Updated firstPlayed/lastPlayed: "
+          f"{declared_first}/{declared_last} → {first}/{last}")
+    return summary, True
+
+
 def main():
     if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
         print(f"Usage: {sys.argv[0]} <import.json> [--warnings]")
@@ -287,6 +311,14 @@ def main():
             while changed:
                 changed = False
 
+                if FIX_WARNINGS and not is_sorted(events):
+                    events, fixed = fix_out_of_order(events)
+                    if fixed:
+                        title_fixes += 1
+                        fixes_applied += 1
+                        changed = True
+                        continue
+
                 if FIX_WARNINGS:
                     focus_indices = find_orphaned_lost_focus(events)
                     if focus_indices:
@@ -296,14 +328,6 @@ def main():
                             fixes_applied += 1
                             changed = True
                             continue
-
-                if FIX_WARNINGS and not is_sorted(events):
-                    events, fixed = fix_out_of_order(events)
-                    if fixed:
-                        title_fixes += 1
-                        fixes_applied += 1
-                        changed = True
-                        continue
 
                 if FIX_WARNINGS:
                     duplicates = find_duplicate_events(events)
@@ -334,6 +358,14 @@ def main():
                 if FIX_WARNINGS:
                     summary, fixed_playtime = fix_playtime(summary, events)
                     if fixed_playtime:
+                        title_fixes += 1
+                        fixes_applied += 1
+                        changed = True
+                        continue
+
+                if FIX_WARNINGS:
+                    summary, fixed_first_last = fix_first_last(summary, events)
+                    if fixed_first_last:
                         title_fixes += 1
                         fixes_applied += 1
                         changed = True

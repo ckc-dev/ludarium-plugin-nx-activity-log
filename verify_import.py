@@ -47,10 +47,15 @@ def verify_metadata(import_data, imported_data, result):
     if "importVersion" in imported_data:
         if imported_data["importVersion"] == import_data.get("exportVersion"):
             result.ok(f"Version matches: {imported_data['importVersion']}")
+        elif imported_data["importVersion"] == "":
+            result.error("importVersion is empty")
         else:
-            result.error(
-                f"Version mismatch: import={imported_data['importVersion']} "
-                f"!= export={import_data.get('exportVersion')}"
+            # NXAL writes its running version into importedData. Importing
+            # an older export with a newer NXAL is valid; only flag the
+            # version difference so the test report is not a false failure.
+            result.warn(
+                f"Version differs: importedData={imported_data['importVersion']} "
+                f"export={import_data.get('exportVersion')}"
             )
     else:
         result.error("importVersion missing from importedData")

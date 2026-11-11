@@ -13,6 +13,7 @@ Exit code: 0 on success, 1 on error.
 """
 
 import os
+import shutil
 import sys
 
 from nxal_codec import (
@@ -167,6 +168,50 @@ def merge_metadata(inputs):
     }
 
 
+def merge_paths(output_path, input_paths, backup=True):
+    """Merge input exports into ``output_path`` in place.
+
+    The output is backed up first when it already exists. Input files are only
+    read. This is the shared implementation used by both the CLI and the
+    environment-scoped host tool.
+    """
+    inputs = []
+    loaded = []
+    for path in input_paths:
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"{path} not found")
+        data = load_json(path)
+        inputs.append(data)
+        users = data.get("users", [])
+        titles = sum(len(u.get("titles", [])) for u in users)
+        loaded.append((path, len(users), titles))
+
+    merged_users = []
+    for data in inputs:
+        merged_users = merge_users(data.get("users", []), merged_users)
+
+    metadata = merge_metadata(inputs)
+    total_titles = sum(len(u.get("titles", [])) for u in merged_users)
+    total_events = sum(
+        len(t["events"]) for u in merged_users for t in u.get("titles", []))
+
+    if backup and os.path.exists(output_path):
+        shutil.copy2(output_path, output_path + ".bak")
+    write_export_json(output_path, {
+        **metadata,
+        "users": merged_users,
+    })
+    return {
+        "path": output_path,
+        "loaded": loaded,
+        "users": len(merged_users),
+        "titles": total_titles,
+        "events": total_events,
+        "backup": (output_path + ".bak" if backup
+                   and os.path.exists(output_path + ".bak") else None),
+    }
+
+
 def main():
     if len(sys.argv) < 4:
         print(f"Usage: {sys.argv[0]} <output.json> <input1.json> <input2.json> [...]")
@@ -175,41 +220,19 @@ def main():
     output_path = sys.argv[1]
     input_paths = sys.argv[2:]
 
-    inputs = []
-    for path in input_paths:
-        if not os.path.exists(path):
-            print(f"Error: {path} not found")
-            sys.exit(1)
-        try:
-            data = load_json(path)
-            inputs.append(data)
-            users = data.get("users", [])
-            titles = sum(len(u.get("titles", [])) for u in users)
-            print(f"Loaded {path}: {len(users)} users, {titles} titles")
-        except Exception as e:
-            print(f"Error loading {path}: {e}")
-            sys.exit(1)
-
-    merged_users = []
-    for data in inputs:
-        merged_users = merge_users(data.get("users", []), merged_users)
-
-    metadata = merge_metadata(inputs)
-
-    total_titles = sum(len(u.get("titles", [])) for u in merged_users)
-    total_events = sum(len(t["events"]) for u in merged_users for t in u.get("titles", []))
-
-    result = {
-        **metadata,
-        "users": merged_users,
-    }
-
-    write_export_json(output_path, result)
-
+    try:
+        stats = merge_paths(output_path, input_paths)
+    except Exception as e:
+        print(f"Error merging exports: {e}")
+        sys.exit(1)
+    for path, users, titles in stats["loaded"]:
+        print(f"Loaded {path}: {users} users, {titles} titles")
+    if stats["backup"]:
+        print(f"Backup: {os.path.basename(stats['backup'])}")
     print(f"\nMerged output: {output_path}")
-    print(f"  Users: {len(merged_users)}")
-    print(f"  Titles: {total_titles}")
-    print(f"  Events: {total_events}")
+    print(f"  Users: {stats['users']}")
+    print(f"  Titles: {stats['titles']}")
+    print(f"  Events: {stats['events']}")
 
 
 if __name__ == "__main__":
