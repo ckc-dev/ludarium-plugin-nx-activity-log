@@ -41,7 +41,7 @@ from nxal_codec import (
     _steady_from,
     _title_session_pairs,
     calculate_playtime,
-    count_launches,
+    count_nxal_launches,
     deduplicate_events,
     event_key,
     find_orphaned_lost_focus,
@@ -51,6 +51,7 @@ from nxal_codec import (
     format_timestamp,
     load_json,
     normalize_event_order,
+    normalize_export_events,
     write_export_json,
 )
 from nxal_repair import updated_summary
@@ -486,11 +487,7 @@ class NXALGameTrackerAdapter:
         data = load_json(self.path)
         # NXAL does not sort imported events; normalize on the host boundary
         # so grouping, summaries and session IDs all see chronological data.
-        for user in data.get("users", []):
-            for title in user.get("titles", []):
-                events = title.get("events")
-                if isinstance(events, list):
-                    title["events"] = normalize_event_order(events)
+        normalize_export_events(data)
         self._cache = data
         try:
             stat = os.stat(self.path)
@@ -805,7 +802,7 @@ class NXALGameTrackerAdapter:
             if not launches:
                 # summary is only refreshed by recalculate_totals; count from
                 # the live event stream so a fresh export still reports them.
-                launches = count_launches(t.get("events", []))
+                launches = count_nxal_launches(t.get("events", []))
             if not launches:
                 continue
             # The same title for two users is one canonical game: add up.
@@ -1462,15 +1459,15 @@ class NXALGameTrackerAdapter:
                 raise AdapterOperationError(
                     f"No session starts at {primary_dt} in "
                     f"'{self.display_name}'.")
-            self._replace_session(
-                data, game_id, primary_dt, primary_dt, new_duration,
-                session_id=primary_ref.session_id)
             title = self._find_title(data, game_id)
             if title is None:
                 raise AdapterOperationError(
                     f"Could not find title {game_id!r} in "
                     f"'{self.display_name}'.")
             events = title.setdefault("events", [])
+            # Remove absorbed sessions first so the primary's new span is
+            # validated against the real remaining neighbours, not against
+            # sessions this merge is intentionally consuming.
             for ref in merge.absorbed:
                 if ref.session_id is not None:
                     removed = self._remove_session_by_id(
@@ -1482,6 +1479,9 @@ class NXALGameTrackerAdapter:
                     raise AdapterOperationError(
                         f"No session starts at {ref.date_time!r} in "
                         f"'{self.display_name}'.")
+            self._replace_session(
+                data, game_id, primary_dt, primary_dt, new_duration,
+                session_id=primary_ref.session_id)
             events[:] = normalize_event_order(events)
             self._recompute_title(data, title)
         self._save(data)

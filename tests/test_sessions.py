@@ -7,7 +7,7 @@ import unittest
 from datetime import datetime, timedelta
 from unittest import mock
 
-from plugin_sdk import AdapterOperationError
+from plugin_sdk import AdapterOperationError, SessionMerge, SessionRef
 from plugins.nx_activity_log import nxal_codec, plugin_tools
 from plugins.nx_activity_log.adapter import NXALGameTrackerAdapter
 
@@ -795,6 +795,26 @@ class NxalSessionTest(unittest.TestCase):
         self.assertEqual(
             adapter._load()['users'][0]['titles'][0]['summary'],
             summary)
+
+
+
+    def test_apply_merges_accepts_adjacent_sessions(self):
+        start = int(datetime(2026, 1, 16, 10, 0, 0).timestamp())
+        path, adapter = self._adapter(_payload(
+            _complete_events(start, 100)
+            + _complete_events(start + 105, 100)))
+        rows = adapter.fetch_dashboard_data()[1]
+        merge = SessionMerge(
+            primary=SessionRef('nxal', rows[0]['date_time'],
+                               rows[0]['session_id']),
+            absorbed=(SessionRef('nxal', rows[1]['date_time'],
+                                 rows[1]['session_id']),),
+            duration=200,
+        )
+        adapter.apply_merges([merge])
+        merged = adapter.fetch_dashboard_data()[1]
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]['duration'], 200)
 
 
     def test_game_merge_candidates_are_scoped_to_one_user(self):
