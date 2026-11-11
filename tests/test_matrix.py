@@ -98,7 +98,7 @@ class TestNxalWriteMatrix(unittest.TestCase):
             parts_after = adapter.get_session_parts(
                 original['game_id'], original['date_time'])
             self.assertTrue(any(
-                part['part_id'] == moved_start
+                part['start_time'] == moved_start
                 for part in parts_after))
 
             second = next(s for s in sessions

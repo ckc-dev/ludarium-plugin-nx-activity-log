@@ -5,6 +5,7 @@ from nxal_codec import (
     count_launches,
     deduplicate_events,
     find_duplicate_events,
+    first_last_from_events,
     load_json,
     sort_events,
     write_export_json,
@@ -57,12 +58,23 @@ def fix_import(params, ctx):
     fixed = 0
     for u in data.get("users", []):
         for t in u.get("titles", []):
-            evs = t.get("events", [])
-            before = len(evs)
-            evs = deduplicate_events(evs, ("titleId", "timestamp", "eventType"))
+            evs = deduplicate_events(
+                t.get("events", []),
+                ("type", "clockTimestamp", "steadyTimestamp"))
+            before = len(t.get("events", []))
             evs = sort_events(evs)
             fixed += before - len(evs)
             t["events"] = evs
+            if not evs:
+                continue
+            summary = t.setdefault("summary", {})
+            first, last = first_last_from_events(
+                evs, summary.get("firstPlayed", 0),
+                summary.get("lastPlayed", 0))
+            summary["firstPlayed"] = first
+            summary["lastPlayed"] = last
+            summary["playtime"] = calculate_playtime(evs)
+            summary["launches"] = count_launches(evs)
     write_export_json(path, data)
     return {"ok": True, "message": f"Rewrote {path} (removed {fixed} dup events)",
             "lines": []}

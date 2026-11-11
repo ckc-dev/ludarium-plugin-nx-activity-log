@@ -60,4 +60,4 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}/host
         run: |
           python -m coverage run --include='*/plugins/nx_activity_log/adapter.py,*/plugins/nx_activity_log/nxal_codec.py,*/plugins/nx_activity_log/plugin_tools.py,*/plugins/nx_activity_log/plugin_health.py' -m unittest discover -s tests -q
-          python -m coverage report --fail-under=75 -m
+          python -m coverage report --fail-under=80 -m

@@ -9,8 +9,9 @@ pristine NXAL export (sorted keys, UTF-8 literal, trailing newline).
 Session model (mirrors NXAL / PlayData.cpp):
   - A "session" is a Launched…Closed group inside a title's events array.
   - start       = the Launched event's clockTimestamp
-  - duration    = focus-pair arithmetic over steadyTimestamp between the
-                  group's Gained Focus / Lost Focus events (calculate_playtime)
+  - duration    = credited focus playtime, derived from steadyTimestamp
+                  between the group's Gained Focus / Lost Focus events
+  - end_time    = wall-clock close (or last observed event) of the group
   - game        = the title; game_id = 'nx_' + title.id (hex), name = title.name
   - firstPlayed/lastPlayed/lastPlayed derived via nxal_codec (first Login /
     last Lost Focus semantics, falling back to event extremes).
@@ -21,6 +22,7 @@ plugin_health.py and reuse the in-repo CLI logic (nxal_codec + merge_exports /
 deduplicate_exports / fix_import / validate_import).
 """
 
+import copy
 import json
 import os
 import sys
@@ -37,6 +39,7 @@ from nxal_codec import (
     calculate_playtime,
     count_launches,
     first_last_from_events,
+    focus_intervals,
     format_timestamp,
     load_json,
     sort_events,
@@ -45,7 +48,90 @@ from nxal_codec import (
 
 from plugin_sdk import AdapterOperationError
 
-MIN_SESSION_DURATION = 300  # 5 minutes; NXAL ignores shorter focus pairs
+
+def _group_end_clock(group):
+    """NXAL's PlaySession end: Closed, else the last Lost Focus/event."""
+    for event in reversed(group):
+        if event.get("type") in ("Closed", "Lost Focus"):
+            value = event.get("clockTimestamp")
+            if isinstance(value, int):
+                return value
+    for event in reversed(group):
+        value = event.get("clockTimestamp")
+        if isinstance(value, int):
+            return value
+    return None
+
+
+def _group_active_segments(group):
+    """Native active focus intervals, in the adapter's timestamp format."""
+    return [
+        {"start_time": format_timestamp(start), "duration": duration}
+        for start, duration in focus_intervals(group)
+        if isinstance(start, int)
+    ]
+
+
+PROTECTED_PART_TYPES = frozenset({
+    "Launched", "Closed", "Account Login", "Account Logout",
+})
+
+
+def _encode_part_id(title_id, timestamp, event_type):
+    return f"{title_id}|{timestamp}|{event_type}"
+
+
+def _decode_part_id(value):
+    """Return (title_id or None, timestamp, event_type or None)."""
+    text = str(value)
+    if "|" in text:
+        title_id, raw_ts, event_type = text.rsplit("|", 2)
+        try:
+            return title_id, int(raw_ts), event_type
+        except (TypeError, ValueError):
+            pass
+    try:
+        return None, _parse_dt(text), None
+    except (TypeError, ValueError) as error:
+        raise AdapterOperationError(
+            f"Invalid session part: {value!r}") from error
+
+
+def _group_bounds(events, event_index):
+    """Return (start index, end index) for the group containing an event."""
+    start = None
+    for index in range(event_index, -1, -1):
+        if events[index].get("type") == "Launched":
+            start = index
+            break
+    if start is None:
+        return None
+    end = len(events) - 1
+    for index in range(event_index, len(events)):
+        if events[index].get("type") == "Closed":
+            end = index
+            break
+    return start, end
+
+
+def _synthetic_session_events(start_ts, duration, anchor):
+    """Build a complete NXAL session, including account attribution events."""
+    offsets = (
+        ("Launched", 0),
+        ("Gained Focus", 2),
+        ("Account Login", 3),
+        ("Lost Focus", 2 + duration),
+        ("Account Logout", 3 + duration),
+        ("Closed", 5 + duration),
+    )
+    return [
+        {
+            "type": event_type,
+            "clockTimestamp": start_ts + offset,
+            "steadyTimestamp": _steady_from(anchor, start_ts + offset),
+        }
+        for event_type, offset in offsets
+    ]
 
 
 class NXALGameTrackerAdapter:
@@ -227,32 +313,42 @@ class NXALGameTrackerAdapter:
             for group in _title_session_pairs([t]):
                 duration = calculate_playtime(group)
                 start_ts = group[0]["clockTimestamp"]
+                end_ts = _group_end_clock(group) or start_ts
                 cleared = True
                 sessions.append({
                     "game_id": game_id,
                     "name": t.get("name", "Unknown"),
                     "native_user_id": self._user_id_for(user_name),
                     "date_time": format_timestamp(start_ts),
+                    "end_time": format_timestamp(end_ts),
+                    "active_segments": _group_active_segments(group),
                     "duration": duration,
                 })
                 total += duration
             if not cleared:
-                stored = t.get("summary", {}).get("playtime", 0)
-                first_ts = t.get("summary", {}).get("firstPlayed", 0) or 0
+                summary = t.get("summary", {})
+                stored = summary.get("playtime", 0)
+                first_ts = summary.get("firstPlayed", 0) or 0
+                last_ts = summary.get("lastPlayed", 0) or first_ts
                 if stored > 0:
+                    last_ts = max(last_ts, first_ts + stored)
                     sessions.append({
                         "game_id": game_id,
                         "name": t.get("name", "Unknown"),
-                        "native_user_id": self.default_user_id,
+                        "native_user_id": self._user_id_for(user_name),
                         "date_time": format_timestamp(first_ts),
+                        "end_time": format_timestamp(last_ts),
+                        "active_segments": [{
+                            "start_time": format_timestamp(first_ts),
+                            "duration": stored,
+                        }],
                         "duration": stored,
                     })
                     total += stored
         # sort chronologically
-        # %s
-        # Titles whose event groups never clear MIN_SESSION_DURATION still own
-        # stored playtime (export summary) - surface them as a single summary
-        # session attributed to default_user_id so they are not silently hidden.
+        # Titles whose event groups cannot be reconstructed still own stored
+        # playtime (export summary); surface one summary session so it is not
+        # silently hidden.
         seen_game = {s["game_id"] for s in sessions}
         for g in games_list:
             stored = g.get("stored_duration", 0)
@@ -264,6 +360,11 @@ class NXALGameTrackerAdapter:
                 "name": g.get("name", "Unknown"),
                 "native_user_id": self.default_user_id,
                 "date_time": format_timestamp(first_ts),
+                "end_time": format_timestamp(first_ts + stored),
+                "active_segments": [{
+                    "start_time": format_timestamp(first_ts),
+                    "duration": stored,
+                }],
                 "duration": stored,
             })
             total += stored
@@ -277,9 +378,8 @@ class NXALGameTrackerAdapter:
     # --- Optional capability: launch counts ---
     # NXAL is the only source that knows how OFTEN a game was opened: its
     # export carries summary.launches per title, and the host's session list
-    # cannot derive it because two Launched events inside one
-    # MIN_SESSION_DURATION span reconstruct into a SINGLE session. Steam has
-    # no launch column at all, so this stays an opt-in capability flag.
+    # cannot derive it because two Launched events can reconstruct into one
+    # session. Steam has no launch column at all, so this stays opt-in.
     supports_game_stats = True
 
     def get_game_stats(self):
@@ -299,7 +399,7 @@ class NXALGameTrackerAdapter:
         return out
 
     def add_game(self, game_id, name):
-        data = self._load()
+        data = copy.deepcopy(self._load())
         if self._find_title(data, game_id) is None:
             # give the title an ID from the provided game_id (strip nx_)
             hex_id = str(game_id).removeprefix("nx_")
@@ -312,7 +412,7 @@ class NXALGameTrackerAdapter:
             self.report(f"Added game '{name}' to '{self.display_name}'")
 
     def delete_game(self, game_id):
-        data = self._load()
+        data = copy.deepcopy(self._load())
         hex_id = str(game_id).removeprefix("nx_").lower()
         for u in data.get("users", []):
             u["titles"] = [t for t in u.get("titles", [])
@@ -322,13 +422,47 @@ class NXALGameTrackerAdapter:
         self._save(data)
 
     def get_game_merge_candidates(self):
-        return []
+        """Duplicate titles with the same name inside one NXAL user."""
+        candidates = []
+        data = self._load()
+        for user in data.get("users", []):
+            by_name = {}
+            for title in user.get("titles", []):
+                name = str(title.get("name") or "").strip()
+                if name:
+                    by_name.setdefault(name.casefold(), []).append(title)
+            for titles in by_name.values():
+                if len(titles) < 2:
+                    continue
+                instances = []
+                for title in titles:
+                    summary = title.get("summary", {})
+                    events = title.get("events", [])
+                    duration = summary.get("playtime")
+                    if duration is None:
+                        duration = calculate_playtime(events)
+                    first, last = first_last_from_events(
+                        events, summary.get("firstPlayed", 0),
+                        summary.get("lastPlayed", 0))
+                    instances.append({
+                        "game_id": "nx_" + str(title.get("id", "")),
+                        "actual_duration": duration,
+                        "last_session": (format_timestamp(last)
+                                         if last else None),
+                    })
+                instances.sort(
+                    key=lambda row: row["actual_duration"], reverse=True)
+                candidates.append({
+                    "name": str(titles[0].get("name") or ""),
+                    "instances": instances,
+                })
+        return candidates
 
     def apply_game_merges(self, primary_id, duplicate_ids):
         self._merge_titles(primary_id, duplicate_ids)
 
     def add_session(self, game_id, start_time, duration):
-        data = self._load()
+        data = copy.deepcopy(self._load())
         title = self._find_title(data, game_id)
         if title is None:
             self.add_game(game_id, str(game_id))
@@ -340,31 +474,63 @@ class NXALGameTrackerAdapter:
                 f"'{self.display_name}'.")
         start_ts = _parse_dt(start_time)
         events = title.setdefault("events", [])
-        duration = int(duration)
+        duration = max(0, int(duration))
         # One anchor for the whole synthesized block: steady stays monotonic
-        # inside it, matching what a real Launched…Closed group looks like.
+        # inside it, matching a real Launched…Closed group.
         anchor = _anchor_for(_event_anchors(events) or _all_anchors(data), start_ts)
-        events.extend([
-            {"type": "Launched", "clockTimestamp": start_ts,
-             "steadyTimestamp": _steady_from(anchor, start_ts)},
-            {"type": "Gained Focus", "clockTimestamp": start_ts + 2,
-             "steadyTimestamp": _steady_from(anchor, start_ts + 2)},
-            {"type": "Lost Focus", "clockTimestamp": start_ts + 2 + duration,
-             "steadyTimestamp": _steady_from(anchor, start_ts + 2 + duration)},
-            {"type": "Closed", "clockTimestamp": start_ts + 6 + duration,
-             "steadyTimestamp": _steady_from(anchor, start_ts + 6 + duration)},
-        ])
+        events.extend(_synthetic_session_events(start_ts, duration, anchor))
         # canonical (clock, steady) order — see nxal_codec.sort_events
         events[:] = sort_events(events)
         self._recompute_title(data, title)
         self._save(data)
 
+    def _remove_session_from_title(self, events, start_ts):
+        """Remove one Launched..Closed group from a title's events array."""
+        group_start = None
+        for index, event in enumerate(events):
+            if (event.get("type") == "Launched"
+                    and event.get("clockTimestamp") == start_ts):
+                group_start = index
+                break
+        if group_start is None:
+            return False
+        end_i = group_start + 1
+        while end_i < len(events) and events[end_i].get("type") != "Closed":
+            end_i += 1
+        if end_i < len(events):
+            end_i += 1
+        del events[group_start:end_i]
+        return True
+
+    def _replace_session(self, data, game_id, old_start, new_start,
+                         duration):
+        """Replace one session in memory; caller saves once."""
+        title = self._find_title(data, game_id)
+        if title is None:
+            raise AdapterOperationError(
+                f"Could not find title {game_id!r} in "
+                f"'{self.display_name}'.")
+        old_ts = _parse_dt(old_start)
+        new_ts = _parse_dt(new_start)
+        events = title.setdefault("events", [])
+        if not self._remove_session_from_title(events, old_ts):
+            raise AdapterOperationError(
+                f"No session starts at {old_start!r} in "
+                f"'{self.display_name}'.")
+        anchor = _anchor_for(
+            _event_anchors(events) or _all_anchors(data), new_ts)
+        events.extend(_synthetic_session_events(
+            new_ts, max(0, int(duration)), anchor))
+        events[:] = sort_events(events)
+        self._recompute_title(data, title)
+
     def update_session(self, game_id, duration, new_start, old_start):
-        self.delete_session(old_start)
-        self.add_session(game_id, new_start, duration)
+        data = copy.deepcopy(self._load())
+        self._replace_session(data, game_id, old_start, new_start, duration)
+        self._save(data)
 
     def delete_session(self, original_date_time):
-        data = self._load()
+        data = copy.deepcopy(self._load())
         target = _parse_dt(original_date_time)
         found = False
         for _user_name, t in self._titles(data):
@@ -419,15 +585,16 @@ class NXALGameTrackerAdapter:
         hex_id = str(game_id)
         if hex_id.startswith("nx_"):
             hex_id = hex_id[len("nx_"):]
-        for _user_name, t in self._titles(data):
-            if str(t.get("id", "")).lower() != hex_id.lower():
+        for _user_name, title in self._titles(data):
+            title_id = str(title.get("id", ""))
+            if title_id.lower() != hex_id.lower():
                 continue
-            events = t.setdefault("events", [])
-            # find the group starting at target
+            events = title.setdefault("events", [])
             group_start = None
-            for i, ev in enumerate(events):
-                if ev.get("type") == "Launched" and ev["clockTimestamp"] == target:
-                    group_start = i
+            for index, event in enumerate(events):
+                if (event.get("type") == "Launched"
+                        and event.get("clockTimestamp") == target):
+                    group_start = index
                     break
             if group_start is None:
                 continue
@@ -437,113 +604,194 @@ class NXALGameTrackerAdapter:
             if end_i >= len(events):
                 continue
             span_events = events[group_start:end_i + 1]
-
-            # emit one part per real event.
-            # Real exports store clockTimestamp as epoch ints; keep prev in int
-            # space so format_timestamp gets ints and gaps are plain seconds.
-            # Each event's duration = seconds until the NEXT event of ANY type
-            # in this span (the plan's "event->next event span"), so the part
-            # durations tile the Launched..Closed span exactly; the last event
-            # (Closed) has no successor -> None. Breaks have no rows of their
-            # own: a Lost Focus part's duration IS the pause until the next
-            # Gained Focus.
-            span_timestamps = [ev.get("clockTimestamp") for ev in span_events]
+            span_timestamps = [event.get("clockTimestamp")
+                               for event in span_events]
             prev_ts = None
-            for i, ev in enumerate(span_events):
-                ts = ev.get("clockTimestamp")
+            for index, event in enumerate(span_events):
+                ts = event.get("clockTimestamp")
                 gap_before = 0
                 if prev_ts is not None and ts is not None:
                     gap_before = ts - prev_ts
-                next_ts = (span_timestamps[i + 1]
-                           if i + 1 < len(span_timestamps) else None)
-                duration = (next_ts - ts) if (next_ts is not None and ts is not None) else None
+                next_ts = (span_timestamps[index + 1]
+                           if index + 1 < len(span_timestamps) else None)
+                duration = ((next_ts - ts)
+                            if next_ts is not None and ts is not None else None)
+                event_type = event.get("type")
                 parts.append({
-                    "part_id": format_timestamp(ts) if ts is not None else None,
-                    "name": ev.get("type"),
-                    "type": ev.get("type"),
+                    "part_id": (_encode_part_id(title_id, ts, event_type)
+                                if ts is not None else None),
+                    "name": event_type,
+                    "type": event_type,
                     "start_time": format_timestamp(ts) if ts is not None else None,
                     "duration": duration,
                     "clockTimestamp": ts,
-                    # Launched/Closed are the group boundaries: they anchor the
-                    # span and must never drift, so they render read-only.
-                    "editable": ev.get("type") not in ("Launched", "Closed"),
+                    "editable": event_type not in PROTECTED_PART_TYPES,
                     "break_before_seconds": gap_before,
                 })
                 if ts is not None:
                     prev_ts = ts
             # Only the FIRST title copy matching id takes part in the UI's
-            # session chain. Duplicate copies (same id, same events, owned by
-            # multiple users) must not be concatenated; edits on the parts pane
-            # hit this first copy and make the copies diverge thereafter.
+            # session chain. Duplicate copies must not be concatenated.
             return parts
         return parts
 
     def update_session_part(self, part_id, duration, new_start, old_start):
-        target_ts = _parse_dt(part_id)
+        title_id, target_ts, target_type = _decode_part_id(part_id)
         new_ts = _parse_dt(new_start)
-        data = self._load()
-        for _user_name, t in self._titles(data):
-            events = t.setdefault("events", [])
-            for ev in events:
-                if ev.get("clockTimestamp") == target_ts:
-                    # re-point this one event; guard: Launched/Closed are the
-                    # group boundaries — both stay put (never drift the group).
-                    if ev.get("type") in ("Launched", "Closed"):
+        data = copy.deepcopy(self._load())
+        for _user_name, title in self._titles(data):
+            if (title_id is not None
+                    and str(title.get("id", "")).lower() != title_id.lower()):
+                continue
+            events = title.setdefault("events", [])
+            for index, event in enumerate(events):
+                if event.get("clockTimestamp") != target_ts:
+                    continue
+                if target_type and event.get("type") != target_type:
+                    continue
+                event_type = event.get("type")
+                if event_type in PROTECTED_PART_TYPES:
+                    raise AdapterOperationError(
+                        f"{event_type} is a required session event and "
+                        "cannot be moved or deleted.")
+                bounds = _group_bounds(events, index)
+                if bounds is None:
+                    raise AdapterOperationError(
+                        "Could not resolve the session containing that part.")
+                group_start, group_end = bounds
+                start_clock = events[group_start].get("clockTimestamp")
+                end_clock = events[group_end].get("clockTimestamp")
+                if (not isinstance(start_clock, int)
+                        or not isinstance(end_clock, int)
+                        or not (start_clock < new_ts <= end_clock)):
+                    raise AdapterOperationError(
+                        "A session part must stay inside its session.")
+                delta = new_ts - target_ts
+                event["clockTimestamp"] = new_ts
+                if isinstance(event.get("steadyTimestamp"), int):
+                    event["steadyTimestamp"] += delta
+                if duration is not None and index < group_end:
+                    try:
+                        new_duration = int(duration)
+                    except (TypeError, ValueError) as error:
                         raise AdapterOperationError(
-                            "Launched and Closed parts anchor the session and "
-                            "cannot be moved.")
-                    ev["clockTimestamp"] = new_ts
-                    events[:] = sort_events(events)
-                    self._recompute_title(data, t)
-                    self._save(data)
-                    return
+                            "Session part duration must be an integer."
+                        ) from error
+                    if new_duration < 0:
+                        raise AdapterOperationError(
+                            "Session part duration cannot be negative.")
+                    next_event = events[index + 1]
+                    next_clock = next_event.get("clockTimestamp")
+                    if isinstance(next_clock, int):
+                        target_next = new_ts + new_duration
+                        if target_next > end_clock:
+                            raise AdapterOperationError(
+                                "The edited part would extend past the "
+                                "session boundary.")
+                        next_delta = target_next - next_clock
+                        next_event["clockTimestamp"] = target_next
+                        if isinstance(next_event.get("steadyTimestamp"), int):
+                            next_event["steadyTimestamp"] += next_delta
+                events[:] = sort_events(events)
+                self._recompute_title(data, title)
+                self._save(data)
+                return
         raise AdapterOperationError(
-            f"No session part starts at {part_id!r} in '{self.display_name}'.")
+            f"No session part matches {part_id!r} in '{self.display_name}'.")
 
     def add_session_part(self, game_id, start_time, duration):
-        data = self._load()
+        data = copy.deepcopy(self._load())
         hex_id = str(game_id)
         if hex_id.startswith("nx_"):
             hex_id = hex_id[len("nx_"):]
-        for _user_name, t in self._titles(data):
-            if str(t.get("id", "")).lower() != hex_id.lower():
+        for _user_name, title in self._titles(data):
+            if str(title.get("id", "")).lower() != hex_id.lower():
                 continue
-            events = t.setdefault("events", [])
+            events = title.setdefault("events", [])
             base = _parse_dt(start_time)
-            # insert a synthetic Gained/Lost Focus pair at start_time -> this
-            # SPLITS the current focus pair in two, inserting a pause between.
-            gained = base
-            lost = base + int(duration)
-            anchor = _anchor_for(_event_anchors(events) or _all_anchors(data), gained)
-            events.append({"type": "Gained Focus", "clockTimestamp": gained,
-                           "steadyTimestamp": _steady_from(anchor, gained)})
-            events.append({"type": "Lost Focus", "clockTimestamp": lost,
-                           "steadyTimestamp": _steady_from(anchor, lost)})
+            try:
+                part_duration = int(duration)
+            except (TypeError, ValueError) as error:
+                raise AdapterOperationError(
+                    "Session part duration must be an integer."
+                ) from error
+            if part_duration <= 0:
+                raise AdapterOperationError(
+                    "Session part duration must be positive.")
+            group = None
+            for group_start in range(len(events)):
+                if events[group_start].get("type") != "Launched":
+                    continue
+                group_end = group_start + 1
+                while (group_end < len(events)
+                       and events[group_end].get("type") != "Closed"):
+                    group_end += 1
+                group_end = min(group_end, len(events) - 1)
+                start_clock = events[group_start].get("clockTimestamp")
+                end_clock = events[group_end].get("clockTimestamp")
+                if (isinstance(start_clock, int)
+                        and isinstance(end_clock, int)
+                        and start_clock <= base <= end_clock):
+                    group = (group_start, group_end)
+                    break
+            if group is None:
+                raise AdapterOperationError(
+                    f"No session contains {start_time!r} in "
+                    f"'{self.display_name}'.")
+            group_start, group_end = group
+            group_events = events[group_start:group_end + 1]
+            end_clock = events[group_end].get("clockTimestamp")
+            if base + part_duration > end_clock:
+                raise AdapterOperationError(
+                    "The new part would extend past the session boundary.")
+            for focus_start, focus_duration in focus_intervals(group_events):
+                focus_end = focus_start + focus_duration
+                if focus_start < base + part_duration and focus_end > base:
+                    raise AdapterOperationError(
+                        "The new part overlaps an existing focus interval.")
+            anchor = _anchor_for(
+                _event_anchors(events) or _all_anchors(data), base)
+            events.append({
+                "type": "Gained Focus",
+                "clockTimestamp": base,
+                "steadyTimestamp": _steady_from(anchor, base),
+            })
+            events.append({
+                "type": "Lost Focus",
+                "clockTimestamp": base + part_duration,
+                "steadyTimestamp": _steady_from(anchor, base + part_duration),
+            })
             events[:] = sort_events(events)
-            self._recompute_title(data, t)
+            self._recompute_title(data, title)
             self._save(data)
             return
         raise AdapterOperationError(
             f"Could not find title {game_id!r} in '{self.display_name}'.")
 
     def delete_session_part(self, part_id):
-        ts = _parse_dt(part_id)
-        data = self._load()
-        for _user_name, t in self._titles(data):
-            events = t.setdefault("events", [])
-            for i, ev in enumerate(events):
-                if ev.get("clockTimestamp") == ts:
-                    # guard: Launched/Closed are the group boundaries — both stay
-                    if ev.get("type") in ("Launched", "Closed"):
-                        raise AdapterOperationError(
-                            "Launched and Closed parts anchor the session and "
-                            "cannot be deleted.")
-                    del events[i]
-                    self._recompute_title(data, t)
-                    self._save(data)
-                    return
+        title_id, target_ts, target_type = _decode_part_id(part_id)
+        data = copy.deepcopy(self._load())
+        for _user_name, title in self._titles(data):
+            if (title_id is not None
+                    and str(title.get("id", "")).lower() != title_id.lower()):
+                continue
+            events = title.setdefault("events", [])
+            for index, event in enumerate(events):
+                if event.get("clockTimestamp") != target_ts:
+                    continue
+                if target_type and event.get("type") != target_type:
+                    continue
+                event_type = event.get("type")
+                if event_type in PROTECTED_PART_TYPES:
+                    raise AdapterOperationError(
+                        f"{event_type} is a required session event and "
+                        "cannot be deleted.")
+                del events[index]
+                self._recompute_title(data, title)
+                self._save(data)
+                return
         raise AdapterOperationError(
-            f"No session part starts at {part_id!r} in '{self.display_name}'.")
+            f"No session part matches {part_id!r} in '{self.display_name}'.")
 
     def recalculate_totals(self):
         data = self._load()
@@ -597,28 +845,35 @@ class NXALGameTrackerAdapter:
         return self.fetch_dashboard_data()[1]
 
     def apply_merges(self, merges):
-        """Collapses adjacent sessions into one spanning session.
-
-        The host passes typed ``SessionMerge`` requests. The primary's game
-        must be resolved before anything is mutated — add_session(game_id,
-        ...) with game_id None used to fabricate a title literally named
-        'None' in the export.
-        """
+        """Collapses adjacent sessions into one session, saving once."""
+        if not merges:
+            return
+        data = copy.deepcopy(self._load())
         for merge in merges:
             primary_dt = merge.primary.date_time
             new_duration = float(merge.duration)
-            data = self._load()
             game_id = self._game_id_for_session(data, primary_dt)
             if game_id is None:
                 raise AdapterOperationError(
                     f"No session starts at {primary_dt} in "
                     f"'{self.display_name}'.")
-
-            # Set the surviving span first, then drop the sessions it absorbed.
-            self.update_session(
-                game_id, new_duration, primary_dt, primary_dt)
+            self._replace_session(
+                data, game_id, primary_dt, primary_dt, new_duration)
+            title = self._find_title(data, game_id)
+            if title is None:
+                raise AdapterOperationError(
+                    f"Could not find title {game_id!r} in "
+                    f"'{self.display_name}'.")
+            events = title.setdefault("events", [])
             for ref in merge.absorbed:
-                self.delete_session(ref.date_time)
+                if not self._remove_session_from_title(
+                        events, _parse_dt(ref.date_time)):
+                    raise AdapterOperationError(
+                        f"No session starts at {ref.date_time!r} in "
+                        f"'{self.display_name}'.")
+            events[:] = sort_events(events)
+            self._recompute_title(data, title)
+        self._save(data)
 
     def _game_id_for_session(self, data, date_time):
         """Returns the 'nx_<hex>' id of the title owning a session start,
@@ -649,21 +904,30 @@ class NXALGameTrackerAdapter:
 
     # ---------- helpers for advanced ops (called by plugin_tools) ----------
     def _merge_titles(self, primary_id, duplicate_ids):
-        data = self._load()
+        data = copy.deepcopy(self._load())
         primary = self._find_title(data, primary_id)
         if primary is None:
             raise AdapterOperationError(
                 f"Could not find title {primary_id!r} in "
                 f"'{self.display_name}'.")
-        for d in duplicate_ids:
-            dup = self._find_title(data, d)
-            if dup is None:
+        owner = next(
+            (user for user in data.get("users", [])
+             if any(title is primary for title in user.get("titles", []))),
+            None)
+        if owner is None:
+            raise AdapterOperationError(
+                f"Could not find the owner of title {primary_id!r}.")
+        duplicate_keys = {
+            str(value).removeprefix("nx_").lower()
+            for value in duplicate_ids
+        }
+        owner_titles = owner.setdefault("titles", [])
+        for duplicate in list(owner_titles):
+            if str(duplicate.get("id", "")).lower() not in duplicate_keys:
                 continue
-            primary.setdefault("events", []).extend(dup.get("events", []))
-            primary["events"].sort(key=lambda e: e["clockTimestamp"])
-            for u in data.get("users", []):
-                u["titles"] = [t for t in u.get("titles", [])
-                               if str(t.get("id", "")).lower() != str(
-                                   str(d).removeprefix("nx_")).lower()]
+            primary.setdefault("events", []).extend(
+                duplicate.get("events", []))
+            owner_titles.remove(duplicate)
+        primary["events"] = sort_events(primary.get("events", []))
         self._recompute_title(data, primary)
         self._save(data)

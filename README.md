@@ -14,6 +14,19 @@ From this plugin repository, with the host application checkout on `PYTHONPATH`:
 PYTHONPATH=/path/to/host python -m unittest discover -s tests -q
 ```
 
+## Session model
+
+NXAL sessions are atomic `Launched…Closed` event groups, even when they cross
+midnight. The host must not split them in storage. `duration` is credited focus
+playtime; the adapter also returns `end_time` and `active_segments` because a
+NXAL session can contain pauses and therefore have `end - start != duration`.
+Charts and calendar views clip the active segments to their selected range.
+
+Synthesized sessions include `Account Login` and `Account Logout` events,
+which NXAL uses to attribute a session to a user. Session parts are keyed by
+title and event type as well as timestamp; required boundary/account events
+are read-only.
+
 ## Acknowledgements
 
 This plugin is designed to interoperate with

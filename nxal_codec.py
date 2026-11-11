@@ -59,22 +59,44 @@ def count_launches(events):
     return sum(1 for ev in events if ev.get("type") == "Launched")
 
 
-def calculate_playtime(events):
-    """Calculate playtime from focus events.
+def focus_intervals(events):
+    """Return (clock start, credited seconds) for completed focus pairs.
 
-    Only counts completed focus periods (Gained Focus → Lost Focus),
-    using clockTimestamp. Unclosed sessions are ignored since we can't
-    know when they ended.
+    NXAL's countPlaytime() uses ``steadyTimestamp`` for a normal focus pair
+    because that clock is monotonic. The wall clock is only the right choice
+    when steady time is unavailable or a reboot made it non-monotonic. Keeping
+    the credited duration here also gives callers the active intervals needed
+    to place play correctly across hours, calendar days and midnight.
     """
-    playtime = 0
-    last_focus_start = None
+    intervals = []
+    start_steady = None
+    start_clock = None
     for ev in events:
         if ev.get("type") == "Gained Focus":
-            last_focus_start = ev.get("clockTimestamp")
-        elif ev.get("type") == "Lost Focus" and last_focus_start is not None:
-            playtime += ev["clockTimestamp"] - last_focus_start
-            last_focus_start = None
-    return playtime
+            start_steady = ev.get("steadyTimestamp")
+            start_clock = ev.get("clockTimestamp")
+        elif ev.get("type") == "Lost Focus" and start_clock is not None:
+            end_steady = ev.get("steadyTimestamp")
+            end_clock = ev.get("clockTimestamp")
+            duration = None
+            if (isinstance(start_steady, int)
+                    and isinstance(end_steady, int)
+                    and end_steady >= start_steady):
+                duration = end_steady - start_steady
+            elif (isinstance(start_clock, int)
+                  and isinstance(end_clock, int)
+                  and end_clock >= start_clock):
+                duration = end_clock - start_clock
+            if duration is not None and duration >= 0:
+                intervals.append((start_clock, duration))
+            start_steady = None
+            start_clock = None
+    return intervals
+
+
+def calculate_playtime(events):
+    """Calculate credited playtime from completed Gained/Lost Focus pairs."""
+    return sum(duration for _start, duration in focus_intervals(events))
 
 
 def find_duplicate_events(events):
