@@ -778,7 +778,7 @@ class NxalSessionTest(unittest.TestCase):
         self.assertEqual(title['events'], _complete_events())
         self.assertEqual(len(adapter.fetch_dashboard_data()[1]), 1)
 
-    def test_add_session_for_user_selects_the_profile(self):
+    def _bound_adapter(self):
         data = _payload(_complete_events())
         data['users'].append({
             'id': 'B' * 32,
@@ -797,12 +797,157 @@ class NxalSessionTest(unittest.TestCase):
                 {'profile_key': 'B' * 32, 'profile_name': 'Bob',
                  'user_id': 2},
             ]})
+        return path, adapter
+
+    def test_add_session_for_user_selects_the_profile(self):
+        _path, adapter = self._bound_adapter()
         adapter.add_session_for_user(
             'nx_' + TITLE_ID, '2026-01-15T10:00:00', 60, 2)
         loaded = adapter._load()
         alice, bob = loaded['users']
         self.assertEqual(len(alice['titles'][0]['events']), 6)
         self.assertEqual(len(bob['titles'][0]['events']), 6)
+
+    def test_update_session_for_user_moves_group_and_recomputes_summaries(self):
+        _path, adapter = self._bound_adapter()
+        row = adapter.fetch_dashboard_data()[1][0]
+        original_events = adapter._load()['users'][0]['titles'][0]['events']
+        old_id = row['session_id']
+        new_id = adapter.update_session_for_user(
+            'nx_' + TITLE_ID, row['duration'], row['date_time'],
+            row['date_time'], 2, session_id=old_id)
+        self.assertNotEqual(new_id, old_id)
+        loaded = adapter._load()
+        alice, bob = loaded['users']
+        self.assertEqual(alice['titles'][0]['events'], [])
+        self.assertEqual(alice['titles'][0]['summary']['playtime'], 0)
+        self.assertEqual(alice['titles'][0]['summary']['launches'], 0)
+        self.assertEqual(len(bob['titles']), 1)
+        self.assertEqual(bob['titles'][0]['events'], original_events)
+        self.assertIn('Account Login', [
+            event['type'] for event in bob['titles'][0]['events']])
+        self.assertEqual(bob['titles'][0]['summary']['playtime'], 100)
+        self.assertEqual(bob['titles'][0]['summary']['launches'], 1)
+        sessions = adapter.fetch_dashboard_data()[1]
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0]['native_user_id'], 2)
+        self.assertEqual(sessions[0]['session_id'], new_id)
+
+    def test_update_session_for_user_reschedules_during_the_move(self):
+        _path, adapter = self._bound_adapter()
+        row = adapter.fetch_dashboard_data()[1][0]
+        new_start = datetime.fromtimestamp(
+            START + 3600).strftime('%Y-%m-%d %H:%M:%S')
+        new_id = adapter.update_session_for_user(
+            'nx_' + TITLE_ID, 50, new_start, row['date_time'], 2,
+            session_id=row['session_id'])
+        loaded = adapter._load()
+        self.assertEqual(loaded['users'][0]['titles'][0]['events'], [])
+        target = loaded['users'][1]['titles'][0]
+        self.assertEqual(target['summary']['playtime'], 50)
+        moved = adapter.fetch_dashboard_data()[1][0]
+        self.assertEqual(moved['session_id'], new_id)
+        self.assertEqual(moved['date_time'], new_start)
+        self.assertEqual(moved['duration'], 50)
+
+    def test_move_and_reschedule_ignores_source_neighbour_conflicts(self):
+        _path, adapter = self._bound_adapter()
+        data = adapter._load()
+        source = data['users'][0]['titles'][0]
+        source['events'].extend(_complete_events(START + 200))
+        source['events'] = nxal_codec.normalize_event_order(source['events'])
+        adapter._save(data)
+        row = next(
+            item for item in adapter.fetch_dashboard_data()[1]
+            if item['date_time'] == datetime.fromtimestamp(
+                START).strftime('%Y-%m-%d %H:%M:%S'))
+        new_start = datetime.fromtimestamp(
+            START + 150).strftime('%Y-%m-%d %H:%M:%S')
+        adapter.update_session_for_user(
+            'nx_' + TITLE_ID, row['duration'], new_start,
+            row['date_time'], 2, session_id=row['session_id'])
+        loaded = adapter._load()
+        alice = loaded['users'][0]['titles'][0]
+        bob = loaded['users'][1]['titles'][0]
+        self.assertEqual(len(alice['events']), 6)
+        self.assertEqual(alice['events'][0]['clockTimestamp'], START + 200)
+        self.assertEqual(bob['summary']['playtime'], 100)
+        self.assertEqual(bob['events'][0]['clockTimestamp'], START + 150)
+
+    def test_update_session_for_user_preserves_pdm_first_last(self):
+        _path, adapter = self._bound_adapter()
+        data = adapter._load()
+        source = data['users'][0]['titles'][0]
+        source['summary'].update({
+            'firstPlayed': 1234,
+            'lastPlayed': 5678,
+            'playtime': 100,
+            'launches': 1,
+        })
+        adapter._save(data)
+        row = adapter.fetch_dashboard_data()[1][0]
+        adapter.update_session_for_user(
+            'nx_' + TITLE_ID, row['duration'], row['date_time'],
+            row['date_time'], 2, session_id=row['session_id'])
+        summary = adapter._load()['users'][0]['titles'][0]['summary']
+        self.assertEqual(summary['firstPlayed'], 1234)
+        self.assertEqual(summary['lastPlayed'], 5678)
+        self.assertEqual(summary['playtime'], 0)
+        self.assertEqual(summary['launches'], 0)
+
+    def test_update_session_for_user_rejects_unmapped_target(self):
+        path, adapter = self._bound_adapter()
+        row = adapter.fetch_dashboard_data()[1][0]
+        with open(path, 'rb') as handle:
+            before = handle.read()
+        with self.assertRaisesRegex(
+                AdapterOperationError, 'No NXAL profile is bound'):
+            adapter.update_session_for_user(
+                'nx_' + TITLE_ID, row['duration'], row['date_time'],
+                row['date_time'], 999, session_id=row['session_id'])
+        with open(path, 'rb') as handle:
+            self.assertEqual(handle.read(), before)
+
+    def test_update_session_for_user_rejects_ambiguous_target(self):
+        _path, adapter = self._bound_adapter()
+        data = adapter._load()
+        data['users'].append({
+            'id': 'C' * 32,
+            'name': 'Carol',
+            'titles': [],
+        })
+        adapter._save(data)
+        adapter.profile_bindings.append({
+            'profile_key': 'C' * 32,
+            'profile_name': 'Carol',
+            'user_id': 2,
+        })
+        row = adapter.fetch_dashboard_data()[1][0]
+        with self.assertRaisesRegex(
+                AdapterOperationError, 'Multiple NXAL profiles'):
+            adapter.update_session_for_user(
+                'nx_' + TITLE_ID, row['duration'], row['date_time'],
+                row['date_time'], 2, session_id=row['session_id'])
+
+    def test_update_session_for_user_rejects_overlap_in_target(self):
+        _path, adapter = self._bound_adapter()
+        data = adapter._load()
+        bob = data['users'][1]
+        bob['titles'].append({
+            'id': TITLE_ID,
+            'name': 'Game',
+            'summary': {},
+            'events': _complete_events(START + 50),
+        })
+        adapter._save(data)
+        row = adapter.fetch_dashboard_data()[1]
+        alice_row = next(item for item in row if item['native_user_id'] == 1)
+        with self.assertRaisesRegex(
+                AdapterOperationError, 'would overlap'):
+            adapter.update_session_for_user(
+                'nx_' + TITLE_ID, alice_row['duration'],
+                alice_row['date_time'], alice_row['date_time'], 2,
+                session_id=alice_row['session_id'])
 
 
 

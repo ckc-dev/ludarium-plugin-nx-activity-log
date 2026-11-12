@@ -377,6 +377,7 @@ class NXALGameTrackerAdapter:
     # database-merge endpoint until that contract is made complete.
     supports_session_write = True
     supports_session_ids = True
+    supports_native_session_users = True
     supports_session_repair = True
     supports_game_write = True
     supports_game_merge = True
@@ -466,7 +467,8 @@ class NXALGameTrackerAdapter:
         if len(matches) > 1:
             raise AdapterOperationError(
                 "Multiple NXAL profiles are bound to the selected user; "
-                "unmap all but one before adding a session.")
+                "map that user to only one profile before adding or moving "
+                "a session.")
         return matches[0]
 
     @staticmethod
@@ -549,15 +551,44 @@ class NXALGameTrackerAdapter:
                 return t
         return None
 
-    def _find_session_by_id(self, data, session_id):
-        """Return (user_name, title, group) for a synthetic session id."""
+    def _find_session_context(self, data, session_id):
+        """Return (user_name, user, title, group) for a session id."""
         wanted = str(session_id)
         for user_name, user, title in self._titles_with_users(data):
             identity = self._user_identity(user)
             for group in _title_session_pairs([title]):
                 if _session_id(identity, title, group) == wanted:
-                    return user_name, title, group
+                    return user_name, user, title, group
         return None
+
+    def _find_session_by_id(self, data, session_id):
+        """Return (user_name, title, group) for a synthetic session id."""
+        found = self._find_session_context(data, session_id)
+        if found is None:
+            return None
+        user_name, _user, title, group = found
+        return user_name, title, group
+
+    def _find_session_context_at(self, data, game_id, start_time):
+        """Resolve a session by game/start when no stable id was supplied."""
+        target = _parse_dt(start_time)
+        hex_id = str(game_id).removeprefix("nx_").lower()
+        matches = []
+        for user_name, user, title in self._titles_with_users(data):
+            if str(title.get("id", "")).lower() != hex_id:
+                continue
+            for group in _title_session_pairs([title]):
+                if group[0].get("clockTimestamp") == target:
+                    matches.append((user_name, user, title, group))
+        if not matches:
+            raise AdapterOperationError(
+                f"No session starts at {start_time!r} in "
+                f"'{self.display_name}'.")
+        if len(matches) > 1:
+            raise AdapterOperationError(
+                "Multiple native sessions start at that time; use the "
+                "session id to edit the intended one.")
+        return matches[0]
 
     @staticmethod
     def _group_start_index(events, group):
@@ -1095,6 +1126,131 @@ class NXALGameTrackerAdapter:
                 events, group_start, group_end, desired_duration)
         events[:] = normalize_event_order(events)
         self._recompute_title(data, title)
+
+    def _recompute_title_after_removal(self, data, title):
+        """Recompute a source title after its final event group moved away.
+
+        PDM first/last values remain untouched, but derived playtime and
+        launches must not keep counting a session that now belongs to another
+        native profile.
+        """
+        if title.get("events"):
+            self._recompute_title(data, title)
+            return
+        summary = title.setdefault("summary", {})
+        summary.setdefault("firstPlayed", 0)
+        summary.setdefault("lastPlayed", 0)
+        summary["playtime"] = 0
+        summary["launches"] = 0
+
+    def _target_title_for_move(self, target_user, source_title, game_id):
+        """Find or create the target profile's title for the moved session."""
+        title = self._find_title_for_user(target_user, game_id)
+        if title is not None:
+            return title
+        hex_id = str(game_id).removeprefix("nx_").lower()
+        title = {
+            "id": hex_id or str(source_title.get("id", "")),
+            "name": str(source_title.get("name") or game_id),
+            "events": [],
+            "summary": {
+                "firstPlayed": 0,
+                "lastPlayed": 0,
+                "playtime": 0,
+                "launches": 0,
+            },
+        }
+        target_user.setdefault("titles", []).append(title)
+        return title
+
+    @staticmethod
+    def _validate_target_title_for_group(target_title, group, target_name):
+        """Reject duplicate or overlapping sessions in the target title."""
+        moved_start = group[0].get("clockTimestamp")
+        moved_end = _group_last_clock(group)
+        if not isinstance(moved_start, int):
+            raise AdapterOperationError(
+                "The selected session has no valid Launched timestamp.")
+        fingerprint = _group_fingerprint(group)
+        for existing in _title_session_pairs([target_title]):
+            if _group_fingerprint(existing) == fingerprint:
+                raise AdapterOperationError(
+                    f"{target_name} already has this session.")
+            existing_start = existing[0].get("clockTimestamp")
+            existing_end = _group_last_clock(existing)
+            if (isinstance(existing_start, int)
+                    and moved_start < existing_end
+                    and moved_end > existing_start):
+                raise AdapterOperationError(
+                    f"The session would overlap another session in "
+                    f"{target_name}'s {target_title.get('name', 'game')} "
+                    f"history.")
+
+    def update_session_for_user(self, game_id, duration, new_start,
+                                old_start, user_id, session_id=None):
+        """Edit timing and move the session to another native NXAL profile."""
+        data = copy.deepcopy(self._load())
+        if session_id is not None:
+            found = self._find_session_context(data, session_id)
+            if found is None:
+                raise AdapterOperationError(
+                    f"Session {session_id!r} no longer exists in "
+                    f"'{self.display_name}'.")
+            _user_name, source_user, source_title, group = found
+        else:
+            (_user_name, source_user, source_title, group) = (
+                self._find_session_context_at(data, game_id, old_start))
+        target_user = self._nxal_user_for_host_id(data, user_id)
+        old_ts = group[0].get("clockTimestamp")
+        if not isinstance(old_ts, int):
+            raise AdapterOperationError(
+                "The selected session has no valid Launched timestamp.")
+        new_ts = _parse_dt(new_start)
+        desired_duration = max(0, int(duration))
+        changed = (new_ts != old_ts
+                   or desired_duration != calculate_playtime(group))
+
+        if target_user is source_user:
+            if changed:
+                self._replace_session(
+                    data, game_id, old_start, new_start, desired_duration,
+                    session_id=session_id)
+            new_id = _session_id(
+                self._user_identity(source_user), source_title, group)
+            if changed:
+                self._save(data)
+            return new_id
+
+        target_title = self._target_title_for_move(
+            target_user, source_title, game_id)
+        if not changed:
+            # The old span must already be free in the target. When timing
+            # also changes, validation happens after the move against the
+            # requested span so a session may leave a crowded source profile.
+            self._validate_target_title_for_group(
+                target_title, group,
+                target_user.get("name", "the target profile"))
+        source_events = source_title.setdefault("events", [])
+        start = self._group_start_index(source_events, group)
+        del source_events[start:start + len(group)]
+        target_events = target_title.setdefault("events", [])
+        target_events.extend(group)
+        target_events[:] = normalize_event_order(target_events)
+        self._recompute_title_after_removal(data, source_title)
+        if changed:
+            # Move first, then apply timing in the target title so source
+            # neighbours no longer constrain a session that is leaving.
+            moved_id = _session_id(
+                self._user_identity(target_user), target_title, group)
+            self._replace_session(
+                data, game_id, old_start, new_start, desired_duration,
+                session_id=moved_id)
+        else:
+            self._recompute_title(data, target_title)
+        new_id = _session_id(
+            self._user_identity(target_user), target_title, group)
+        self._save(data)
+        return new_id
 
     def update_session(self, game_id, duration, new_start, old_start,
                        session_id=None):

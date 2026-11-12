@@ -28,8 +28,10 @@ is credited focus playtime; the adapter also returns `end_time` and
 `end - start != duration`. Charts and calendar views clip the active segments
 to their selected range.
 
-NXAL uses `Account Login` / `Account Logout` events for user attribution.
-Existing valid account events are preserved where they occur; canonical
+NXAL requires `Account Login` / `Account Logout` events for session
+accounting; native ownership comes from the containing `users[]` profile, not
+from an account id on the event. Existing valid account events are preserved
+where they occur, including when a session moves to another profile; canonical
 Login/Logout events are generated when a session has none, and a missing
 Logout is added when an incomplete session is repaired. Session parts expose
 only logical active-play segments: users add, move, resize, or delete play
@@ -58,9 +60,20 @@ the identical group.
 Profile-to-user mappings are host data, not plugin JSON. The environment editor
 discovers native NXAL profiles from the configured file and lets each profile
 be mapped to a GameTime user or left unmapped for the environment default.
+Bindings are one-to-one inside one NXAL environment: a GameTime user cannot
+own two native profiles, because the session editor needs one unambiguous
+target when moving a session inside the NXAL file. An unmapped profile counts
+as using the default user for this check. The same GameTime user may still map
+to different profiles in different NXAL files.
+
 Native ids are the stable key; display names are refreshed from the file.
 Deleting a GameTime user leaves the binding unmapped rather than producing an
 "Unknown" session. Stale profiles remain visible until explicitly removed.
+
+NXAL reports `native_user_id`, so the host treats native ownership as
+authoritative and ignores host session overrides for this adapter. Existing
+override rows are cleaned when a native session is edited; they do not mask
+newly moved native sessions.
 
 ## Host tools
 
@@ -100,13 +113,23 @@ user through host-managed native profile bindings and refuses an unmapped or
 ambiguous selection. Bindings are selected in the environment editor from the
 profiles found in the NXAL file, not typed as JSON.
 
+Changing the User in the session editor moves the whole `Launched…Closed`
+event group to the target native profile's title collection. Timing edits and
+the ownership move happen in one adapter write. The group is not rebuilt, so
+existing account events and focus intervals are preserved; the target title is
+created when needed, target overlaps are rejected, and both source and target
+summaries are recomputed. If the source title loses its last session, its PDM
+`firstPlayed`/`lastPlayed` stay intact while `playtime` and `launches` return to
+zero.
+
 NXAL has no native session id, so the adapter derives a host id from the native
 NXAL user id, title id and the full event group identity. Including every event
 makes collisions between different sessions practically impossible; identical
 duplicate groups still intentionally share an id until repaired. Editing a
-session changes its id; the host resolves the new id after a mutation and
-migrates the user override. The native NXAL user id keeps identity stable
-across profile renames.
+session changes its id, and moving it to another native profile changes the
+user-id component. The host reloads the row and clears any old host override;
+native ownership is authoritative. The native NXAL user id keeps identity
+stable across profile renames.
 
 `firstPlayed` / `lastPlayed` are preserved from the existing summary during
 adapter edits, because NXAL takes them from the console PDM database rather

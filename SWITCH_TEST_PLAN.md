@@ -110,7 +110,9 @@ Expected:
 1. Create a Ludarium NXAL environment pointing at a **copy** of the Switch
    export.
 2. Open the environment profile picker and bind each discovered Switch profile
-   to the matching GameTime user.
+   to a different GameTime user. Try binding two profiles to the same user and
+   confirm the form refuses to save; an unmapped profile counts as using the
+   environment default user for this check.
 3. Open Sessions and Games.
 4. Compare against the NXAL export.
 
@@ -152,6 +154,11 @@ Expected:
 
 - Add a session with an explicit host user; an unmapped/ambiguous NXAL profile
   must be rejected rather than assigned to the first profile.
+- Change the session User to another mapped Switch profile, without editing
+  its start or duration. Confirm the whole event group moves to that native
+  profile in the file.
+- Change User and start/duration in the same save. Confirm the move is atomic
+  and the target has the edited timing.
 - Move a session start.
 - Change duration.
 - Delete a session.
@@ -162,7 +169,12 @@ Expected:
 
 Expected:
 
-- Overrides remain attached by session ID where possible.
+- User moves preserve the native event group, including account events; no
+  host-only override reappears.
+- Source and target summaries recompute; an emptied source keeps PDM
+  first/last but reports zero playtime/launches.
+- Moving onto an existing target session with an overlapping span is rejected.
+- Unmapped or ambiguous target profiles leave the file unchanged.
 - Duplicate game merge does not duplicate events or playtime.
 - Summary playtime/launches recompute.
 - No invalid daisy-chained session boundaries.
